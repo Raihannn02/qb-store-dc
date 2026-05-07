@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Notify Discord — Deployment Starting
+        continue-on-error: true
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -61,6 +62,7 @@ jobs:
 
       - name: Notify Discord — Deployment Successful
         if: success()
+        continue-on-error: true
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -93,6 +95,7 @@ jobs:
 
       - name: Notify Discord — Deployment Failed
         if: failure()
+        continue-on-error: true
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
