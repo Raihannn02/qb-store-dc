@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Rout
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const supabase = require('./supabaseClient');
 
 function formatPrice(input) {
     if (!input || input === '0') return 'Rp. 0';
@@ -24,47 +25,36 @@ const client = new Client({
 });
 
 const configPath = path.join(__dirname, 'config.json');
-const productsPath = path.join(__dirname, 'products.json');
-const usersPath = path.join(__dirname, 'users.json');
-const stockPath = path.join(__dirname, 'stock.json');
-const pendingPaymentsPath = path.join(__dirname, 'pending_payments.json');
 
 let dashboardMessageId = null;
 
-function loadJSON(filePath) {
+function loadConfig() {
     try {
-        if (!fs.existsSync(filePath)) {
-            const defaultEmpty = filePath.endsWith('users.json') ? []
-                : filePath.endsWith('pending_payments.json') ? {}
-                    : filePath.endsWith('stock.json') ? {}
-                        : {};
-            fs.writeFileSync(filePath, JSON.stringify(defaultEmpty, null, 2), 'utf8');
+        if (!fs.existsSync(configPath)) {
+            fs.writeFileSync(configPath, JSON.stringify({}, null, 2), 'utf8');
         }
-        const data = fs.readFileSync(filePath, 'utf8');
-        return JSON.parse(data);
+        return JSON.parse(fs.readFileSync(configPath, 'utf8'));
     } catch (err) {
-        console.error(`Error reading ${filePath}:`, err);
-        return null;
+        console.error('Error loading config:', err);
+        return {};
     }
 }
 
-function saveJSON(filePath, data) {
+function saveConfig(data) {
     try {
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+        fs.writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf8');
         return true;
     } catch (err) {
-        console.error(`Error writing ${filePath}:`, err);
+        console.error('Error saving config:', err);
         return false;
     }
 }
 
 async function updateDatabaseEmbed(productId) {
-    const stock = loadJSON(stockPath);
-    const products = loadJSON(productsPath);
-    const product = products.find(p => p.id === productId);
-    if (!product) return;
+    const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
+    if (prodError || !product) return;
 
-    const config = loadJSON(configPath);
+    const config = loadConfig();
     const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
     if (!dbChannelId) return;
 
@@ -72,7 +62,9 @@ async function updateDatabaseEmbed(productId) {
         const channel = await client.channels.fetch(dbChannelId);
         if (!channel) return;
 
-        const productStock = stock[productId] || [];
+        const { data: productStock, error: stockError } = await supabase.from('stock').select('*').eq('product_id', productId).order('created_at', { ascending: false });
+        if (stockError) return;
+
         const unixTime = Math.floor(Date.now() / 1000);
         const embed = new EmbedBuilder()
             .setTitle(`🛡️ DATABASE MONITOR | ${product.name.toUpperCase()}`)
@@ -84,7 +76,7 @@ async function updateDatabaseEmbed(productId) {
                 {
                     name: '📦 Available Items',
                     value: productStock.length > 0
-                        ? productStock.slice(0, 15).map((s, i) => `**${i + 1}.** \`${s.data.replaceAll('|', ', ')}\` • <t:${Math.floor(s.added_at / 1000)}:R>`).join('\n') + (productStock.length > 15 ? '\n*... and more*' : '')
+                        ? productStock.slice(0, 15).map((s, i) => `**${i + 1}.** \`${s.content.replaceAll('|', ', ')}\` • <t:${Math.floor(new Date(s.created_at).getTime() / 1000)}:R>`).join('\n') + (productStock.length > 15 ? '\n*... and more*' : '')
                         : '*No stock items found in database.*'
                 }
             )
@@ -123,9 +115,9 @@ async function registerCommands() {
 }
 
 async function updateDashboard() {
-    const config = loadJSON(configPath);
-    const products = loadJSON(productsPath);
-    if (!config || !products) return;
+    const config = loadConfig();
+    const { data: products, error } = await supabase.from('products').select('*').order('name');
+    if (error || !config || !products) return;
 
     try {
         const channel = await client.channels.fetch(config.channelId);
@@ -176,7 +168,6 @@ async function updateDashboard() {
         }
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') {
-            // Suppress noise for intermittent network issues
             return;
         }
         console.error('Dashboard Update Error:', e);
@@ -212,19 +203,23 @@ client.on('interactionCreate', async interaction => {
                 });
                 return;
             }
+
             if (interaction.customId === 'btn_register') {
-                const users = loadJSON(usersPath) || [];
-                if (users.includes(interaction.user.id)) return interaction.reply({ content: 'Already registered!', flags: [MessageFlags.Ephemeral] });
-                users.push(interaction.user.id);
-                saveJSON(usersPath, users);
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (user) return interaction.reply({ content: 'Already registered!', flags: [MessageFlags.Ephemeral] });
+
+                await supabase.from('users').insert([{ id: interaction.user.id }]);
                 await interaction.reply({ content: 'Registered!', flags: [MessageFlags.Ephemeral] });
             }
             else if (interaction.customId === 'btn_buy') {
-                if (!(loadJSON(usersPath) || []).includes(interaction.user.id)) return interaction.reply({ content: 'Register first!', flags: [MessageFlags.Ephemeral] });
-                const p = loadJSON(productsPath) || [];
-                if (p.length === 0) return interaction.reply({ content: 'No products.', flags: [MessageFlags.Ephemeral] });
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (!user) return interaction.reply({ content: 'Register first!', flags: [MessageFlags.Ephemeral] });
+
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.reply({ content: 'No products.', flags: [MessageFlags.Ephemeral] });
+
                 const s = new StringSelectMenuBuilder().setCustomId('sel_buy').setPlaceholder('Choose a product')
-                    .addOptions(p.map(x => ({ label: x.name, description: `Stock: ${x.stock} | Price: ${x.price}`, value: x.id })));
+                    .addOptions(products.map(x => ({ label: x.name, description: `Stock: ${x.stock} | Price: ${x.price}`, value: x.id })));
                 await interaction.reply({ components: [new ActionRowBuilder().addComponents(s)], flags: [MessageFlags.Ephemeral] });
             }
             else if (interaction.customId.startsWith('btn_db_add_')) {
@@ -237,30 +232,26 @@ client.on('interactionCreate', async interaction => {
             else if (interaction.customId.startsWith('btn_db_edit_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('btn_db_edit_pick_', '');
-                const stock = loadJSON(stockPath)[pid] || [];
-                if (stock.length === 0) return interaction.reply({ content: 'No stock to edit.', flags: [MessageFlags.Ephemeral] });
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return interaction.reply({ content: 'No stock to edit.', flags: [MessageFlags.Ephemeral] });
                 const select = new StringSelectMenuBuilder().setCustomId(`sel_db_edit_${pid}`).setPlaceholder('Select an entry');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.data.slice(0, 40)}`, value: i.toString() }));
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
                 await interaction.reply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)], flags: [MessageFlags.Ephemeral] });
             }
             else if (interaction.customId.startsWith('btn_db_del_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('btn_db_del_pick_', '');
-                const stock = loadJSON(stockPath)[pid] || [];
-                if (stock.length === 0) return interaction.reply({ content: 'No stock to delete.', flags: [MessageFlags.Ephemeral] });
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return interaction.reply({ content: 'No stock to delete.', flags: [MessageFlags.Ephemeral] });
                 const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select to delete');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.data.slice(0, 40)}`, value: i.toString() }));
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
                 await interaction.reply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)], flags: [MessageFlags.Ephemeral] });
             }
             else if (interaction.customId.startsWith('btn_check_pay_')) {
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
-                const pending = loadJSON(pendingPaymentsPath);
-                const pay = pending[orderId];
-                if (!pay) return interaction.reply({ content: 'Invalid transaction.', flags: [MessageFlags.Ephemeral] });
-                if (pay.processing) return interaction.reply({ content: 'Processing. Wait...', flags: [MessageFlags.Ephemeral] });
+                const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
+                if (fetchPayError || !pay) return interaction.reply({ content: 'Invalid transaction.', flags: [MessageFlags.Ephemeral] });
 
-                pay.processing = true;
-                saveJSON(pendingPaymentsPath, pending);
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 try {
@@ -269,43 +260,41 @@ client.on('interactionCreate', async interaction => {
                     });
 
                     if (res.data.transaction?.status === 'completed') {
-                        const products = loadJSON(productsPath);
-                        const pid = pay.productId;
-                        const pIdx = products.findIndex(x => x.id === pid);
-                        const stock = loadJSON(stockPath);
+                        const { data: pidStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
+                        if (!pidStock || pidStock.length < pay.qty) {
+                            return interaction.editReply({ content: '⚠️ Error deliver: Stock suddenly depleted.' });
+                        }
 
-                        const deliver = stock[pid].splice(0, pay.qty);
-                        products[pIdx].stock = stock[pid].length;
-                        saveJSON(stockPath, stock);
-                        saveJSON(productsPath, products);
-                        delete pending[orderId];
-                        saveJSON(pendingPaymentsPath, pending);
+                        const deliver = pidStock.map(s => s.content);
+                        const stockIds = pidStock.map(s => s.id);
+
+                        await supabase.from('stock').delete().in('id', stockIds);
+
+                        const { data: remainingStock } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
+                        await supabase.from('products').update({ stock: remainingStock.length }).eq('id', pay.product_id);
+
+                        await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
 
                         const successEmbed = new EmbedBuilder()
                             .setTitle('🎉 PURCHASE SUCCESSFUL')
                             .setColor('#43B581')
-                            .setDescription(`➡ Produk: \`${pIdx !== -1 ? products[pIdx].name : pid}\`\n➡ Qty: \`${pay.qty}\`\n➡ Total: \`Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}\`\n\n📋 Details:\n${deliver.map(d => `\`${d.data}\``).join('\n')}`)
+                            .setDescription(`➡ Produk ID: \`${pay.product_id}\`\n➡ Qty: \`${pay.qty}\`\n➡ Total: \`Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}\`\n\n📋 Details:\n${deliver.map(d => `\`${d}\``).join('\n')}`)
                             .setTimestamp();
 
                         await interaction.user.send({ embeds: [successEmbed] }).catch(() => { });
                         await interaction.editReply({ content: '✅ Success! Items sent to DMs.', embeds: [successEmbed] });
 
-                        // Log
                         const logChanId = process.env.HISTORY_LOG_CHANNEL_ID;
                         if (logChanId) {
                             const chan = await client.channels.fetch(logChanId).catch(() => null);
-                            if (chan) chan.send({ embeds: [new EmbedBuilder().setTitle('ORDER COMPLETED').setDescription(`User: <@${interaction.user.id}>\nProduk: ${pid}\nTotal: Rp. ${pay.amount}`).setTimestamp()] });
+                            if (chan) chan.send({ embeds: [new EmbedBuilder().setTitle('ORDER COMPLETED').setDescription(`User: <@${interaction.user.id}>\nProduk: ${pay.product_id}\nTotal: Rp. ${pay.amount}`).setTimestamp()] });
                         }
                         updateDashboard();
-                        updateDatabaseEmbed(pid);
+                        updateDatabaseEmbed(pay.product_id);
                     } else {
-                        pay.processing = false;
-                        saveJSON(pendingPaymentsPath, pending);
                         await interaction.editReply({ content: 'Not paid yet.' });
                     }
                 } catch (e) {
-                    pay.processing = false;
-                    saveJSON(pendingPaymentsPath, pending);
                     await interaction.editReply({ content: 'Error checking payment.' });
                 }
             }
@@ -327,15 +316,15 @@ client.on('interactionCreate', async interaction => {
                     return await interaction.showModal(modal);
                 }
                 else if (choice === 'opt_edit_p') {
-                    const products = loadJSON(productsPath) || [];
-                    if (products.length === 0) return interaction.reply({ content: 'No products to edit.', flags: [MessageFlags.Ephemeral] });
+                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    if (!products || products.length === 0) return interaction.reply({ content: 'No products to edit.', flags: [MessageFlags.Ephemeral] });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_edit_pick').setPlaceholder('Select a product to edit...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
                     return await interaction.reply({ content: '✏️ Select a product to edit:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
                 }
                 else if (choice === 'opt_del_p') {
-                    const products = loadJSON(productsPath) || [];
-                    if (products.length === 0) return interaction.reply({ content: 'No products to delete.', flags: [MessageFlags.Ephemeral] });
+                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    if (!products || products.length === 0) return interaction.reply({ content: 'No products to delete.', flags: [MessageFlags.Ephemeral] });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_del_pick').setPlaceholder('Select a product to DELETE...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
                     return await interaction.reply({ content: '🗑️ **CAUTION**: Select a product to PERMANENTLY delete:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
@@ -346,7 +335,7 @@ client.on('interactionCreate', async interaction => {
                     return await interaction.showModal(modal);
                 }
                 else if (choice === 'opt_config') {
-                    const config = loadJSON(configPath);
+                    const config = loadConfig();
                     const modal = new ModalBuilder().setCustomId('mod_config').setTitle('⚙️ Configure Dashboard');
                     modal.addComponents(
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('Embed Title').setValue(config.embed?.title || '').setStyle(TextInputStyle.Short).setRequired(false)),
@@ -360,7 +349,7 @@ client.on('interactionCreate', async interaction => {
             }
             else if (interaction.customId === 'sel_p_edit_pick') {
                 const pid = interaction.values[0];
-                const p = loadJSON(productsPath).find(x => x.id === pid);
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p) return interaction.update({ content: 'Product not found.', components: [] });
                 const modal = new ModalBuilder().setCustomId(`mod_p_edit_${pid}`).setTitle(`Edit Product | ${pid}`);
                 modal.addComponents(
@@ -373,16 +362,14 @@ client.on('interactionCreate', async interaction => {
             }
             else if (interaction.customId === 'sel_p_del_pick') {
                 const pid = interaction.values[0];
-                const products = loadJSON(productsPath).filter(p => p.id !== pid);
-                const stock = loadJSON(stockPath); delete stock[pid];
-                saveJSON(productsPath, products); saveJSON(stockPath, stock);
+                await supabase.from('products').delete().eq('id', pid);
                 await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
                 updateDashboard();
                 return;
             }
             if (interaction.customId === 'sel_buy') {
                 const pid = interaction.values[0];
-                const p = loadJSON(productsPath).find(x => x.id === pid);
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p || p.stock <= 0) return interaction.update({ content: 'Out of stock.', components: [], flags: [MessageFlags.Ephemeral] });
                 const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle(`Buy ${p.name}`);
                 modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('q').setLabel('Quantity').setStyle(TextInputStyle.Short).setRequired(true)));
@@ -390,27 +377,24 @@ client.on('interactionCreate', async interaction => {
             }
             else if (interaction.customId.startsWith('sel_db_edit_')) {
                 const pid = interaction.customId.replace('sel_db_edit_', '');
-                const idx = parseInt(interaction.values[0]);
-                const stock = loadJSON(stockPath)[pid] || [];
-                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}_${idx}`).setTitle('Edit Entry');
-                modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('data').setLabel('Data').setValue(stock[idx].data).setStyle(TextInputStyle.Short).setRequired(true)));
+                const sid = interaction.values[0];
+                const { data: s } = await supabase.from('stock').select('*').eq('id', sid).single();
+                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}_${sid}`).setTitle('Edit Entry');
+                modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('data').setLabel('Data').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)));
                 await interaction.showModal(modal);
             }
             else if (interaction.customId.startsWith('sel_db_del_')) {
                 const pid = interaction.customId.replace('sel_db_del_', '');
-                const idx = parseInt(interaction.values[0]);
-                const stock = loadJSON(stockPath);
-                if (stock[pid] && stock[pid][idx]) {
-                    stock[pid].splice(idx, 1);
-                    saveJSON(stockPath, stock);
-                    const products = loadJSON(productsPath);
-                    const p = products.find(x => x.id === pid);
-                    if (p) p.stock = stock[pid].length;
-                    saveJSON(productsPath, products);
-                    await interaction.update({ content: '✅ Deleted.', components: [] });
-                    updateDatabaseEmbed(pid);
-                    updateDashboard();
-                }
+                const sid = interaction.values[0];
+
+                await supabase.from('stock').delete().eq('id', sid);
+
+                const { data: stockCount } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
+                await supabase.from('products').update({ stock: stockCount.length }).eq('id', pid);
+
+                await interaction.update({ content: '✅ Deleted.', components: [] });
+                updateDatabaseEmbed(pid);
+                updateDashboard();
             }
             return;
         }
@@ -418,38 +402,35 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isModalSubmit()) {
             if (interaction.customId === 'mod_p_add') {
                 const id = interaction.fields.getTextInputValue('id');
-                const products = loadJSON(productsPath) || [];
-                if (products.some(p => p.id === id)) return interaction.reply({ content: '❌ Product with this ID already exists.', flags: [MessageFlags.Ephemeral] });
+                const { data: existing } = await supabase.from('products').select('id').eq('id', id).single();
+                if (existing) return interaction.reply({ content: '❌ Product with this ID already exists.', flags: [MessageFlags.Ephemeral] });
 
-                products.push({
+                await supabase.from('products').insert([{
                     id,
                     name: interaction.fields.getTextInputValue('name'),
                     stock: 0,
                     price: formatPrice(interaction.fields.getTextInputValue('price')),
                     format: interaction.fields.getTextInputValue('format'),
                     description: interaction.fields.getTextInputValue('desc') || '-'
-                });
-                saveJSON(productsPath, products);
+                }]);
                 await interaction.reply({ content: `✅ Product \`${id}\` added successfully!`, flags: [MessageFlags.Ephemeral] });
                 updateDashboard();
             }
             else if (interaction.customId.startsWith('mod_p_edit_')) {
                 const pid = interaction.customId.replace('mod_p_edit_', '');
-                const products = loadJSON(productsPath);
-                const p = products.find(x => x.id === pid);
-                if (!p) return interaction.reply({ content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
 
-                p.name = interaction.fields.getTextInputValue('name');
-                p.price = formatPrice(interaction.fields.getTextInputValue('price'));
-                p.format = interaction.fields.getTextInputValue('format');
-                p.description = interaction.fields.getTextInputValue('desc');
+                await supabase.from('products').update({
+                    name: interaction.fields.getTextInputValue('name'),
+                    price: formatPrice(interaction.fields.getTextInputValue('price')),
+                    format: interaction.fields.getTextInputValue('format'),
+                    description: interaction.fields.getTextInputValue('desc')
+                }).eq('id', pid);
 
-                saveJSON(productsPath, products);
                 await interaction.reply({ content: `✅ Product \`${pid}\` updated!`, flags: [MessageFlags.Ephemeral] });
                 updateDashboard();
             }
             else if (interaction.customId === 'mod_config') {
-                const config = loadJSON(configPath);
+                const config = loadConfig();
                 if (!config.embed) config.embed = {};
 
                 config.embed.title = interaction.fields.getTextInputValue('title');
@@ -460,37 +441,37 @@ client.on('interactionCreate', async interaction => {
                 const newIntv = parseInt(interaction.fields.getTextInputValue('intv'));
                 if (!isNaN(newIntv)) config.updateInterval = Math.max(5000, newIntv);
 
-                saveJSON(configPath, config);
+                saveConfig(config);
                 await interaction.reply({ content: '✅ Dashboard configuration updated!', flags: [MessageFlags.Ephemeral] });
                 updateDashboard();
             }
             else if (interaction.customId === 'mod_manual_pay') {
                 const inv = interaction.fields.getTextInputValue('inv').trim();
-                const pending = loadJSON(pendingPaymentsPath);
-                const pay = pending[inv];
+                const { data: pay } = await supabase.from('pending_payments').select('*').eq('invoice_id', inv).single();
                 if (!pay) return interaction.reply({ content: `❌ Order ID \`${inv}\` not found.`, flags: [MessageFlags.Ephemeral] });
 
-                const products = loadJSON(productsPath);
-                const stock = loadJSON(stockPath);
-                const prod = products.find(p => p.id === pay.productId);
+                const { data: prodStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
 
-                if (!prod || !stock[pay.productId] || stock[pay.productId].length < pay.qty) {
+                if (!prodStock || prodStock.length < pay.qty) {
                     return interaction.reply({ content: '❌ Product or sufficient stock not found.', flags: [MessageFlags.Ephemeral] });
                 }
 
-                const items = stock[pay.productId].splice(0, pay.qty).map(s => s.data);
-                saveJSON(stockPath, stock);
-                prod.stock = stock[pay.productId].length;
-                saveJSON(productsPath, products);
-                delete pending[inv];
-                saveJSON(pendingPaymentsPath, pending);
+                const items = prodStock.map(s => s.content);
+                const stockIds = prodStock.map(s => s.id);
 
-                const user = await client.users.fetch(pay.userId).catch(() => null);
+                await supabase.from('stock').delete().in('id', stockIds);
+
+                const { data: remainingStock } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
+                await supabase.from('products').update({ stock: remainingStock.length }).eq('id', pay.product_id);
+
+                await supabase.from('pending_payments').delete().eq('invoice_id', inv);
+
+                const user = await client.users.fetch(pay.user_id).catch(() => null);
                 if (user) {
                     const buyEmbed = new EmbedBuilder()
                         .setTitle('✅ ORDER COMPLETED')
                         .setColor('#00ff00')
-                        .setDescription(`Terima kasih telah berbelanja!\n\n**Produk:** \`${prod.name}\`\n**Jumlah:** \`${pay.qty}\`\n\n**Data Produk:**\n\`\`\`${items.join('\n')}\`\`\``)
+                        .setDescription(`Terima kasih telah berbelanja!\n\n**Produk ID:** \`${pay.product_id}\`\n**Jumlah:** \`${pay.qty}\`\n\n**Data Produk:**\n\`\`\`${items.join('\n')}\`\`\``)
                         .setTimestamp();
                     await user.send({ embeds: [buyEmbed] }).catch(() => { });
                 }
@@ -499,8 +480,8 @@ client.on('interactionCreate', async interaction => {
                 if (logChannel) {
                     const logEmbed = new EmbedBuilder().setTitle('📦 ORDER COMPLETED (MANUAL)').setColor('#00ff00')
                         .addFields(
-                            { name: 'Buyer', value: `<@${pay.userId}>`, inline: true },
-                            { name: 'Product', value: prod.name, inline: true },
+                            { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                            { name: 'Product', value: pay.product_id, inline: true },
                             { name: 'Qty', value: pay.qty.toString(), inline: true }
                         )
                         .setFooter({ text: `Order ID: ${inv} (Manual Fulfill)` }).setTimestamp();
@@ -509,19 +490,18 @@ client.on('interactionCreate', async interaction => {
 
                 await interaction.reply({ content: `✅ Order \`${inv}\` successfully fulfilled manually!`, flags: [MessageFlags.Ephemeral] });
                 updateDashboard();
-                updateDatabaseEmbed(pay.productId);
+                updateDatabaseEmbed(pay.product_id);
             }
-            if (interaction.customId.startsWith('mod_db_add_')) {
+            else if (interaction.customId.startsWith('mod_db_add_')) {
                 const pid = interaction.customId.replace('mod_db_add_', '');
                 const lines = interaction.fields.getTextInputValue('data').split('\n').filter(l => l.trim());
-                const stock = loadJSON(stockPath);
-                if (!stock[pid]) stock[pid] = [];
-                lines.forEach(l => stock[pid].push({ data: l.trim(), added_at: Date.now() }));
-                saveJSON(stockPath, stock);
-                const products = loadJSON(productsPath);
-                const p = products.find(x => x.id === pid);
-                if (p) p.stock = stock[pid].length;
-                saveJSON(productsPath, products);
+
+                const stockToInsert = lines.map(line => ({ product_id: pid, content: line.trim() }));
+                await supabase.from('stock').insert(stockToInsert);
+
+                const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
+                await supabase.from('products').update({ stock: count.length }).eq('id', pid);
+
                 await interaction.reply({ content: `Added ${lines.length} items.`, flags: [MessageFlags.Ephemeral] });
                 updateDatabaseEmbed(pid);
                 updateDashboard();
@@ -529,20 +509,19 @@ client.on('interactionCreate', async interaction => {
             else if (interaction.customId.startsWith('mod_db_edit_')) {
                 const parts = interaction.customId.split('_');
                 const pid = parts[3];
-                const idx = parseInt(parts[4]);
-                const stock = loadJSON(stockPath);
-                if (stock[pid] && stock[pid][idx]) {
-                    stock[pid][idx].data = interaction.fields.getTextInputValue('data').trim();
-                    saveJSON(stockPath, stock);
-                    await interaction.reply({ content: 'Updated.', flags: [MessageFlags.Ephemeral] });
-                    updateDatabaseEmbed(pid);
-                }
+                const sid = parts[4];
+
+                await supabase.from('stock').update({ content: interaction.fields.getTextInputValue('data').trim() }).eq('id', sid);
+
+                await interaction.reply({ content: 'Updated.', flags: [MessageFlags.Ephemeral] });
+                updateDatabaseEmbed(pid);
             }
             else if (interaction.customId.startsWith('mod_buy_')) {
                 const pid = interaction.customId.replace('mod_buy_', '');
                 const qty = parseInt(interaction.fields.getTextInputValue('q'));
                 if (isNaN(qty) || qty <= 0) return interaction.reply({ content: 'Invalid qty.', flags: [MessageFlags.Ephemeral] });
-                const p = loadJSON(productsPath).find(x => x.id === pid);
+
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (p.stock < qty) return interaction.reply({ content: 'No stock.', flags: [MessageFlags.Ephemeral] });
 
                 const orderId = `INV${Date.now()}`;
@@ -552,9 +531,15 @@ client.on('interactionCreate', async interaction => {
                 }).catch(() => null);
 
                 if (res?.data?.payment) {
-                    const pending = loadJSON(pendingPaymentsPath);
-                    pending[orderId] = { userId: interaction.user.id, productId: pid, qty, amount: res.data.payment.total_payment, createdAt: Date.now() };
-                    saveJSON(pendingPaymentsPath, pending);
+                    await supabase.from('pending_payments').insert([{
+                        invoice_id: orderId,
+                        user_id: interaction.user.id,
+                        product_id: pid,
+                        qty,
+                        amount: res.data.payment.total_payment,
+                        created_at: new Date().toISOString()
+                    }]);
+
                     const embed = new EmbedBuilder().setTitle('💳 PAYMENT').setDescription(`Scan QRIS for **${qty}x ${p.name}**.\nTotal: \`Rp. ${res.data.payment.total_payment}\``)
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`);
                     await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success))] });
