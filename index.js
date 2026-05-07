@@ -26,6 +26,10 @@ const client = new Client({
 
 const configPath = path.join(__dirname, 'config.json');
 
+// ✅ FIX #4 — In-memory cache untuk menyimpan messageId per productId di storage channel
+// Ini memastikan bot tidak kehilangan referensi embed setelah restart (dicari ulang saat dibutuhkan)
+const dbEmbedMessageCache = new Map(); // productId -> messageId
+
 let dashboardMessageId = null;
 
 function loadConfig() {
@@ -50,6 +54,7 @@ function saveConfig(data) {
     }
 }
 
+// ✅ FIX #1 & #2 & #4 — updateDatabaseEmbed yang diperbaiki sepenuhnya
 async function updateDatabaseEmbed(productId) {
     const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
     if (prodError || !product) {
@@ -58,15 +63,27 @@ async function updateDatabaseEmbed(productId) {
     }
 
     const config = loadConfig();
-    const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
-    if (!dbChannelId) return;
+
+    // ✅ FIX #1 — Prioritas channel: DATABASE_CHANNEL_ID dari env (wajib ada untuk storage)
+    // Jika tidak ada DATABASE_CHANNEL_ID, log error yang jelas dan berhenti
+    const dbChannelId = process.env.DATABASE_CHANNEL_ID;
+    if (!dbChannelId) {
+        console.error(`[STORAGE EMBED] ❌ DATABASE_CHANNEL_ID tidak diset di environment variables! Storage embed untuk '${productId}' tidak dapat dibuat.`);
+        return;
+    }
 
     try {
         const channel = await client.channels.fetch(dbChannelId);
-        if (!channel) return;
+        if (!channel) {
+            console.error(`[STORAGE EMBED] ❌ Channel DATABASE_CHANNEL_ID (${dbChannelId}) tidak ditemukan.`);
+            return;
+        }
 
         const { data: productStock, error: stockError } = await supabase.from('stock').select('*').eq('product_id', productId).order('created_at', { ascending: false });
-        if (stockError) return;
+        if (stockError) {
+            console.error(`[STORAGE EMBED] ❌ Gagal fetch stock untuk '${productId}':`, stockError.message);
+            return;
+        }
 
         const unixTime = Math.floor(Date.now() / 1000);
         const embed = new EmbedBuilder()
@@ -94,22 +111,68 @@ async function updateDatabaseEmbed(productId) {
             new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
         );
 
-        const messages = await channel.messages.fetch({ limit: 50 });
-        const productMsg = messages.find(m => m.embeds[0]?.footer?.text?.includes(productId));
+        // ✅ FIX #2 & #4 — Cari messageId dari cache dulu, lalu scan channel jika tidak ada di cache
+        let existingMessageId = dbEmbedMessageCache.get(productId);
+        let productMsg = null;
+
+        if (existingMessageId) {
+            // Coba fetch langsung dari messageId yang di-cache
+            try {
+                productMsg = await channel.messages.fetch(existingMessageId);
+            } catch (fetchErr) {
+                // Pesan sudah dihapus atau tidak valid, hapus dari cache
+                console.warn(`[STORAGE EMBED] ⚠️ Cached messageId untuk '${productId}' tidak valid, melakukan scan ulang...`);
+                dbEmbedMessageCache.delete(productId);
+                existingMessageId = null;
+            }
+        }
+
+        // Jika tidak ada di cache atau cache invalid, scan channel (lebih dalam dari sebelumnya)
+        if (!productMsg) {
+            console.log(`[STORAGE EMBED] 🔍 Scanning channel untuk embed '${productId}'...`);
+            let lastMessageId = null;
+            let found = false;
+
+            // Scan sampai 200 pesan terakhir (4x fetch @50)
+            for (let i = 0; i < 4 && !found; i++) {
+                const fetchOptions = { limit: 50 };
+                if (lastMessageId) fetchOptions.before = lastMessageId;
+
+                const messages = await channel.messages.fetch(fetchOptions);
+                if (messages.size === 0) break;
+
+                const match = messages.find(m =>
+                    m.author.id === client.user.id &&
+                    m.embeds.length > 0 &&
+                    m.embeds[0]?.footer?.text?.includes(productId)
+                );
+
+                if (match) {
+                    productMsg = match;
+                    dbEmbedMessageCache.set(productId, match.id); // Simpan ke cache
+                    found = true;
+                    console.log(`[STORAGE EMBED] ✅ Embed untuk '${productId}' ditemukan (messageId: ${match.id}), di-cache.`);
+                } else {
+                    lastMessageId = messages.last()?.id;
+                }
+            }
+        }
 
         if (productMsg) {
             await productMsg.edit({ embeds: [embed], components: [row] });
+            console.log(`[STORAGE EMBED] ✅ Embed untuk '${productId}' berhasil di-update.`);
         } else {
-            await channel.send({ embeds: [embed], components: [row] });
+            // Buat embed baru dan simpan messageId ke cache
+            const newMsg = await channel.send({ embeds: [embed], components: [row] });
+            dbEmbedMessageCache.set(productId, newMsg.id);
+            console.log(`[STORAGE EMBED] ✅ Embed baru untuk '${productId}' berhasil dibuat (messageId: ${newMsg.id}).`);
         }
     } catch (e) {
-        console.error('Database Embed Update Error:', e);
+        console.error(`[STORAGE EMBED] ❌ Database Embed Update Error untuk '${productId}':`, e.message || e);
     }
 }
 
 async function registerCommands() {
-    // Slash commands are no longer used for administration.
-    // All features have been migrated to Button-Based interactions.
     const commands = [];
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
@@ -174,6 +237,55 @@ async function updateDashboard() {
             return;
         }
         console.error('Dashboard Update Error:', e);
+    }
+}
+
+// ✅ TAMBAHAN — Saat bot ready, pre-load semua embed yang sudah ada ke cache
+// Ini memastikan setelah restart, bot langsung tahu messageId semua embed storage
+async function preloadDatabaseEmbedCache() {
+    const dbChannelId = process.env.DATABASE_CHANNEL_ID;
+    if (!dbChannelId) {
+        console.warn('[CACHE PRELOAD] ⚠️ DATABASE_CHANNEL_ID tidak diset, skip preload cache.');
+        return;
+    }
+
+    try {
+        const channel = await client.channels.fetch(dbChannelId);
+        if (!channel) return;
+
+        console.log('[CACHE PRELOAD] 🔄 Memuat cache embed storage dari channel...');
+        let lastMessageId = null;
+        let totalCached = 0;
+
+        // Scan sampai 500 pesan untuk memuat semua embed yang ada
+        for (let i = 0; i < 10; i++) {
+            const fetchOptions = { limit: 50 };
+            if (lastMessageId) fetchOptions.before = lastMessageId;
+
+            const messages = await channel.messages.fetch(fetchOptions);
+            if (messages.size === 0) break;
+
+            messages.forEach(m => {
+                if (m.author.id === client.user.id && m.embeds.length > 0) {
+                    const footerText = m.embeds[0]?.footer?.text || '';
+                    // Footer format: "QUANTUMBLOX DATABASE SYSTEM • PRODUCT_ID"
+                    const match = footerText.match(/QUANTUMBLOX DATABASE SYSTEM • (.+)/);
+                    if (match && match[1]) {
+                        const pid = match[1].trim();
+                        if (!dbEmbedMessageCache.has(pid)) {
+                            dbEmbedMessageCache.set(pid, m.id);
+                            totalCached++;
+                        }
+                    }
+                }
+            });
+
+            lastMessageId = messages.last()?.id;
+        }
+
+        console.log(`[CACHE PRELOAD] ✅ Berhasil cache ${totalCached} embed storage.`);
+    } catch (e) {
+        console.error('[CACHE PRELOAD] ❌ Gagal preload cache:', e.message);
     }
 }
 
@@ -280,7 +392,6 @@ client.on('interactionCreate', async interaction => {
 
                         const formattedAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
 
-                        // DM to buyer — includes delivered items
                         const dmEmbed = new EmbedBuilder()
                             .setTitle('✅  Order Confirmed')
                             .setColor('#00b894')
@@ -296,7 +407,6 @@ client.on('interactionCreate', async interaction => {
                             .setTimestamp();
                         await interaction.user.send({ embeds: [dmEmbed] }).catch(() => { });
 
-                        // Ephemeral reply in channel — no item data shown
                         const replyEmbed = new EmbedBuilder()
                             .setTitle('✅  Order Confirmed')
                             .setColor('#00b894')
@@ -311,7 +421,6 @@ client.on('interactionCreate', async interaction => {
                             .setTimestamp();
                         await interaction.editReply({ embeds: [replyEmbed] });
 
-                        // History log
                         const logChanId = process.env.HISTORY_LOG_CHANNEL_ID;
                         if (logChanId) {
                             const chan = await client.channels.fetch(logChanId).catch(() => null);
@@ -333,7 +442,6 @@ client.on('interactionCreate', async interaction => {
                             });
                         }
 
-                        // Payment log (separate channel)
                         const payLogChanId = process.env.PAYMENT_LOG_CHANNEL_ID;
                         if (payLogChanId) {
                             const payLogChan = await client.channels.fetch(payLogChanId).catch(() => null);
@@ -429,6 +537,8 @@ client.on('interactionCreate', async interaction => {
             }
             else if (interaction.customId === 'sel_p_del_pick') {
                 const pid = interaction.values[0];
+                // ✅ Hapus juga dari cache saat produk dihapus
+                dbEmbedMessageCache.delete(pid);
                 await supabase.from('products').delete().eq('id', pid);
                 await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
                 updateDashboard();
@@ -443,10 +553,14 @@ client.on('interactionCreate', async interaction => {
                 await interaction.showModal(modal);
             }
             else if (interaction.customId.startsWith('sel_db_edit_')) {
+                // ✅ FIX #3 — Gunakan replace instead of split untuk menghindari masalah dengan UUID yang mengandung '_'
                 const pid = interaction.customId.replace('sel_db_edit_', '');
                 const sid = interaction.values[0];
                 const { data: s } = await supabase.from('stock').select('*').eq('id', sid).single();
-                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}_${sid}`).setTitle('Edit Entry');
+                if (!s) return interaction.reply({ content: 'Stock entry not found.', flags: [MessageFlags.Ephemeral] });
+
+                // ✅ FIX #3 — customId untuk modal menggunakan separator '||' untuk menghindari konflik dengan '_' dalam UUID
+                const modal = new ModalBuilder().setCustomId(`mod_db_edit||${pid}||${sid}`).setTitle('Edit Entry');
                 modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('data').setLabel('Data').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)));
                 await interaction.showModal(modal);
             }
@@ -487,10 +601,17 @@ client.on('interactionCreate', async interaction => {
                 }
 
                 console.log(`[PRODUCT STORAGE] ✅ Product '${id}' saved to database. Registering storage embed...`);
-                await interaction.reply({ content: `✅ Product \`${id}\` added successfully!`, flags: [MessageFlags.Ephemeral] });
-                updateDashboard();
-                // 🔑 FIX: Register the new product into the storage/database embed channel immediately
-                updateDatabaseEmbed(id).catch(e => console.error(`[PRODUCT STORAGE] ❌ Failed to create storage embed for '${id}':`, e.message));
+
+                // ✅ Reply dulu agar tidak timeout, lalu buat embed storage
+                await interaction.reply({ content: `✅ Product \`${id}\` added successfully! Creating storage embed...`, flags: [MessageFlags.Ephemeral] });
+
+                // Update dashboard dan database embed secara paralel
+                await Promise.allSettled([
+                    updateDashboard(),
+                    updateDatabaseEmbed(id).catch(e => console.error(`[PRODUCT STORAGE] ❌ Failed to create storage embed for '${id}':`, e.message))
+                ]);
+
+                console.log(`[PRODUCT STORAGE] ✅ Storage embed untuk '${id}' berhasil dibuat.`);
             }
             else if (interaction.customId.startsWith('mod_p_edit_')) {
                 const pid = interaction.customId.replace('mod_p_edit_', '');
@@ -622,14 +743,20 @@ client.on('interactionCreate', async interaction => {
                 updateDatabaseEmbed(pid);
                 updateDashboard();
             }
-            else if (interaction.customId.startsWith('mod_db_edit_')) {
-                const parts = interaction.customId.split('_');
-                const pid = parts[3];
-                const sid = parts[4];
+            else if (interaction.customId.startsWith('mod_db_edit||')) {
+                // ✅ FIX #3 — Parse menggunakan separator '||' yang aman
+                const parts = interaction.customId.replace('mod_db_edit||', '').split('||');
+                const pid = parts[0];
+                const sid = parts[1];
+
+                if (!pid || !sid) {
+                    console.error(`[EDIT STOCK] ❌ Gagal parse customId: '${interaction.customId}'`);
+                    return interaction.reply({ content: '❌ Internal error: invalid edit reference.', flags: [MessageFlags.Ephemeral] });
+                }
 
                 await supabase.from('stock').update({ content: interaction.fields.getTextInputValue('data').trim() }).eq('id', sid);
 
-                await interaction.reply({ content: 'Updated.', flags: [MessageFlags.Ephemeral] });
+                await interaction.reply({ content: '✅ Updated.', flags: [MessageFlags.Ephemeral] });
                 updateDatabaseEmbed(pid);
             }
             else if (interaction.customId.startsWith('mod_buy_')) {
@@ -688,6 +815,9 @@ client.once('clientReady', async () => {
     client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
     await registerCommands();
 
+    // ✅ Preload cache semua embed storage yang sudah ada sebelum bot mulai beroperasi
+    await preloadDatabaseEmbedCache();
+
     // VPS Log — Bot Online notification
     const vpsLogChanId = process.env.VPS_LOG_CHANNEL_ID;
     if (vpsLogChanId) {
@@ -701,7 +831,8 @@ client.once('clientReady', async () => {
                     .addFields(
                         { name: 'Tag', value: client.user.tag, inline: true },
                         { name: 'Status', value: 'Online', inline: true },
-                        { name: 'VPS Status', value: 'Running', inline: true }
+                        { name: 'VPS Status', value: 'Running', inline: true },
+                        { name: 'Cache', value: `${dbEmbedMessageCache.size} embed(s) loaded`, inline: true }
                     )
                     .setFooter({ text: 'QUANTUMBLOX STORE' })
                     .setTimestamp()
