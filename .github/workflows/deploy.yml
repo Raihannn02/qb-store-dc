@@ -8,7 +8,38 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Executing remote ssh commands
+      - name: Notify Discord — Deployment Starting
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          jq -n \
+            --arg title "Deployment Started" \
+            --argjson color 16760064 \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg sha "${SHORT_SHA}" \
+            --arg msg "${COMMIT_MSG}" \
+            --arg actor "${{ github.actor }}" \
+            '{embeds: [{
+              title: $title,
+              color: $color,
+              fields: [
+                {name: "Repository", value: $repo, inline: true},
+                {name: "Branch",     value: $branch, inline: true},
+                {name: "Commit",     value: $sha, inline: true},
+                {name: "Message",    value: $msg, inline: false},
+                {name: "Triggered By", value: $actor, inline: true},
+                {name: "VPS Status", value: "Pulling latest changes...", inline: true}
+              ],
+              footer: {text: "QUANTUMBLOX STORE"},
+              timestamp: (now | todate)
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
+
+      - name: Deploy to VPS via SSH
+        id: deploy
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_IP }}
@@ -16,7 +47,6 @@ jobs:
           password: ${{ secrets.VPS_PASSWORD }}
           script: |
             cd /root/qb-bot
-            # Check if it's a git repo, if not initialize it
             if [ ! -d .git ]; then
               git init
               git remote add origin https://github.com/Raihannn02/qb-store-dc.git
@@ -26,5 +56,68 @@ jobs:
             fi
             git fetch --all
             git reset --hard origin/main
-            npm install
-            pm2 restart qb-bot
+            npm install --production
+            pm2 restart qb-bot --update-env
+
+      - name: Notify Discord — Deployment Successful
+        if: success()
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          jq -n \
+            --arg title "Deployment Successful" \
+            --argjson color 47252 \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg sha "${SHORT_SHA}" \
+            --arg msg "${COMMIT_MSG}" \
+            --arg actor "${{ github.actor }}" \
+            '{embeds: [{
+              title: $title,
+              color: $color,
+              fields: [
+                {name: "Repository",  value: $repo, inline: true},
+                {name: "Branch",      value: $branch, inline: true},
+                {name: "Commit",      value: $sha, inline: true},
+                {name: "Message",     value: $msg, inline: false},
+                {name: "Deployed By", value: $actor, inline: true},
+                {name: "VPS Status",  value: "Online", inline: true},
+                {name: "Bot Status",  value: "Restarted", inline: true}
+              ],
+              footer: {text: "QUANTUMBLOX STORE"},
+              timestamp: (now | todate)
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
+
+      - name: Notify Discord — Deployment Failed
+        if: failure()
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          jq -n \
+            --arg title "Deployment Failed" \
+            --argjson color 15548997 \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg sha "${SHORT_SHA}" \
+            --arg msg "${COMMIT_MSG}" \
+            --arg actor "${{ github.actor }}" \
+            '{embeds: [{
+              title: $title,
+              color: $color,
+              fields: [
+                {name: "Repository",   value: $repo, inline: true},
+                {name: "Branch",       value: $branch, inline: true},
+                {name: "Commit",       value: $sha, inline: true},
+                {name: "Message",      value: $msg, inline: false},
+                {name: "Triggered By", value: $actor, inline: true},
+                {name: "VPS Status",   value: "Error — Manual intervention required.", inline: false}
+              ],
+              footer: {text: "QUANTUMBLOX STORE"},
+              timestamp: (now | todate)
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
