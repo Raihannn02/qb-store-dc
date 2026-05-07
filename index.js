@@ -295,7 +295,9 @@ client.on('interactionCreate', async interaction => {
                         await interaction.editReply({ content: 'Not paid yet.' });
                     }
                 } catch (e) {
-                    await interaction.editReply({ content: 'Error checking payment.' });
+                    const errMsg = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
+                    console.error('Payment Check Error:', errMsg, '| Amount:', pay.amount, '| OrderId:', orderId);
+                    await interaction.editReply({ content: `❌ Error checking payment. (${e?.response?.status || 'network error'})` });
                 }
             }
             return;
@@ -525,9 +527,10 @@ client.on('interactionCreate', async interaction => {
                 if (p.stock < qty) return interaction.reply({ content: 'No stock.', flags: [MessageFlags.Ephemeral] });
 
                 const orderId = `INV${Date.now()}`;
+                const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
-                    project: process.env.PAKASIR_SLUG, order_id: orderId, amount: parseInt(p.price.replace(/\D/g, '')) * qty, api_key: process.env.PAKASIR_API_KEY
+                    project: process.env.PAKASIR_SLUG, order_id: orderId, amount: originalAmount, api_key: process.env.PAKASIR_API_KEY
                 }).catch(() => null);
 
                 if (res?.data?.payment) {
@@ -536,7 +539,7 @@ client.on('interactionCreate', async interaction => {
                         user_id: interaction.user.id,
                         product_id: pid,
                         qty,
-                        amount: res.data.payment.total_payment,
+                        amount: originalAmount,
                         created_at: new Date().toISOString()
                     }]);
 
