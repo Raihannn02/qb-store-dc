@@ -1,0 +1,30 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Executing remote ssh commands
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            cd /root/qb-bot
+            # Check if it's a git repo, if not initialize it
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/Raihannn02/qb-store-dc.git
+              git add .
+              git commit -m "Initial commit from VPS"
+              git branch -M main
+            fi
+            git fetch --all
+            git reset --hard origin/main
+            npm install
+            pm2 restart qb-bot
