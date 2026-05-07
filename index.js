@@ -275,19 +275,81 @@ client.on('interactionCreate', async interaction => {
 
                         await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
 
-                        const successEmbed = new EmbedBuilder()
-                            .setTitle('🎉 PURCHASE SUCCESSFUL')
-                            .setColor('#43B581')
-                            .setDescription(`➡ Produk ID: \`${pay.product_id}\`\n➡ Qty: \`${pay.qty}\`\n➡ Total: \`Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}\`\n\n📋 Details:\n${deliver.map(d => `\`${d}\``).join('\n')}`)
+                        const formattedAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+
+                        // DM to buyer — includes delivered items
+                        const dmEmbed = new EmbedBuilder()
+                            .setTitle('✅  Order Confirmed')
+                            .setColor('#00b894')
+                            .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
+                            .addFields(
+                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total Paid', value: formattedAmount, inline: true },
+                                { name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
+                            )
+                            .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
                             .setTimestamp();
+                        await interaction.user.send({ embeds: [dmEmbed] }).catch(() => { });
 
-                        await interaction.user.send({ embeds: [successEmbed] }).catch(() => { });
-                        await interaction.editReply({ content: '✅ Success! Items sent to DMs.', embeds: [successEmbed] });
+                        // Ephemeral reply in channel — no item data shown
+                        const replyEmbed = new EmbedBuilder()
+                            .setTitle('✅  Order Confirmed')
+                            .setColor('#00b894')
+                            .setDescription('Your order has been processed. Your item(s) have been delivered to your DMs.')
+                            .addFields(
+                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: formattedAmount, inline: true }
+                            )
+                            .setFooter({ text: 'QUANTUMBLOX STORE' })
+                            .setTimestamp();
+                        await interaction.editReply({ embeds: [replyEmbed] });
 
+                        // History log
                         const logChanId = process.env.HISTORY_LOG_CHANNEL_ID;
                         if (logChanId) {
                             const chan = await client.channels.fetch(logChanId).catch(() => null);
-                            if (chan) chan.send({ embeds: [new EmbedBuilder().setTitle('ORDER COMPLETED').setDescription(`User: <@${interaction.user.id}>\nProduk: ${pay.product_id}\nTotal: Rp. ${pay.amount}`).setTimestamp()] });
+                            if (chan) chan.send({
+                                embeds: [new EmbedBuilder()
+                                    .setTitle('Order Completed')
+                                    .setColor('#2d3436')
+                                    .addFields(
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Product', value: pay.product_id, inline: true },
+                                        { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Process', value: 'Automatic', inline: true }
+                                    )
+                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
+                                    .setTimestamp()
+                                ]
+                            });
+                        }
+
+                        // Payment log (separate channel)
+                        const payLogChanId = process.env.PAYMENT_LOG_CHANNEL_ID;
+                        if (payLogChanId) {
+                            const payLogChan = await client.channels.fetch(payLogChanId).catch(() => null);
+                            if (payLogChan) payLogChan.send({
+                                embeds: [new EmbedBuilder()
+                                    .setTitle('Payment Received')
+                                    .setColor('#0099ff')
+                                    .addFields(
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Product', value: pay.product_id, inline: true },
+                                        { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Status', value: 'Completed', inline: true }
+                                    )
+                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
+                                    .setTimestamp()
+                                ]
+                            });
                         }
                         updateDashboard();
                         updateDatabaseEmbed(pay.product_id);
@@ -468,26 +530,66 @@ client.on('interactionCreate', async interaction => {
 
                 await supabase.from('pending_payments').delete().eq('invoice_id', inv);
 
-                const user = await client.users.fetch(pay.user_id).catch(() => null);
-                if (user) {
-                    const buyEmbed = new EmbedBuilder()
-                        .setTitle('✅ ORDER COMPLETED')
-                        .setColor('#00ff00')
-                        .setDescription(`Terima kasih telah berbelanja!\n\n**Produk ID:** \`${pay.product_id}\`\n**Jumlah:** \`${pay.qty}\`\n\n**Data Produk:**\n\`\`\`${items.join('\n')}\`\`\``)
+                const manualFormattedAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+
+                const buyer = await client.users.fetch(pay.user_id).catch(() => null);
+                if (buyer) {
+                    const dmEmbed = new EmbedBuilder()
+                        .setTitle('✅  Order Confirmed')
+                        .setColor('#00b894')
+                        .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
+                        .addFields(
+                            { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                            { name: 'Product', value: pay.product_id, inline: true },
+                            { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                            { name: 'Total Paid', value: manualFormattedAmount, inline: true },
+                            { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
+                        )
+                        .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
                         .setTimestamp();
-                    await user.send({ embeds: [buyEmbed] }).catch(() => { });
+                    await buyer.send({ embeds: [dmEmbed] }).catch(() => { });
                 }
 
-                const logChannel = client.channels.cache.get(process.env.HISTORY_LOG_CHANNEL_ID);
+                const logChannel = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
                 if (logChannel) {
-                    const logEmbed = new EmbedBuilder().setTitle('📦 ORDER COMPLETED (MANUAL)').setColor('#00ff00')
-                        .addFields(
-                            { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
-                            { name: 'Product', value: pay.product_id, inline: true },
-                            { name: 'Qty', value: pay.qty.toString(), inline: true }
-                        )
-                        .setFooter({ text: `Order ID: ${inv} (Manual Fulfill)` }).setTimestamp();
-                    await logChannel.send({ embeds: [logEmbed] });
+                    await logChannel.send({
+                        embeds: [new EmbedBuilder()
+                            .setTitle('Order Completed')
+                            .setColor('#2d3436')
+                            .addFields(
+                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                                { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Process', value: 'Manual', inline: true }
+                            )
+                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
+                            .setTimestamp()
+                        ]
+                    });
+                }
+
+                const manualPayLogChan = process.env.PAYMENT_LOG_CHANNEL_ID
+                    ? await client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null)
+                    : null;
+                if (manualPayLogChan) {
+                    await manualPayLogChan.send({
+                        embeds: [new EmbedBuilder()
+                            .setTitle('Payment Received')
+                            .setColor('#0099ff')
+                            .addFields(
+                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                                { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Status', value: 'Completed (Manual)', inline: true }
+                            )
+                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
+                            .setTimestamp()
+                        ]
+                    });
                 }
 
                 await interaction.reply({ content: `✅ Order \`${inv}\` successfully fulfilled manually!`, flags: [MessageFlags.Ephemeral] });
@@ -543,8 +645,21 @@ client.on('interactionCreate', async interaction => {
                         created_at: new Date().toISOString()
                     }]);
 
-                    const embed = new EmbedBuilder().setTitle('💳 PAYMENT').setDescription(`Scan QRIS for **${qty}x ${p.name}**.\nTotal: \`Rp. ${res.data.payment.total_payment}\``)
-                        .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`);
+                    const embed = new EmbedBuilder()
+                        .setTitle('💳  Payment Invoice')
+                        .setColor('#0099ff')
+                        .setDescription('Scan the QR code below using a QRIS-compatible app, then click **Check Payment** to verify your transfer.')
+                        .addFields(
+                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                            { name: 'Product', value: p.name, inline: true },
+                            { name: 'Quantity', value: `${qty}x`, inline: true },
+                            { name: 'Amount', value: `Rp. ${new Intl.NumberFormat('id-ID').format(res.data.payment.total_payment)}`, inline: true },
+                            { name: 'Method', value: 'QRIS', inline: true },
+                            { name: 'Status', value: '`Awaiting Payment`', inline: true }
+                        )
+                        .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
+                        .setFooter({ text: 'QUANTUMBLOX STORE' })
+                        .setTimestamp();
                     await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success))] });
                 } else await interaction.editReply({ content: 'Payment error.' });
             }
@@ -560,6 +675,29 @@ client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
     await registerCommands();
+
+    // VPS Log — Bot Online notification
+    const vpsLogChanId = process.env.VPS_LOG_CHANNEL_ID;
+    if (vpsLogChanId) {
+        const vpsLogChan = await client.channels.fetch(vpsLogChanId).catch(() => null);
+        if (vpsLogChan) {
+            vpsLogChan.send({
+                embeds: [new EmbedBuilder()
+                    .setTitle('Bot Online')
+                    .setColor('#00b894')
+                    .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
+                    .addFields(
+                        { name: 'Tag', value: client.user.tag, inline: true },
+                        { name: 'Status', value: 'Online', inline: true },
+                        { name: 'VPS Status', value: 'Running', inline: true }
+                    )
+                    .setFooter({ text: 'QUANTUMBLOX STORE' })
+                    .setTimestamp()
+                ]
+            }).catch(() => { });
+        }
+    }
+
     updateDashboard();
     setInterval(updateDashboard, 15000);
 });
