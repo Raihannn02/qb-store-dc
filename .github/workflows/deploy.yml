@@ -7,7 +7,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
+      # ─────────────────────────────────────────
+      # STEP 1 — Notify Discord: Deployment Starting
+      # ─────────────────────────────────────────
       - name: Notify Discord — Deployment Starting
         continue-on-error: true
         env:
@@ -17,7 +21,7 @@ jobs:
           SHORT_SHA="${{ github.sha }}"
           SHORT_SHA="${SHORT_SHA:0:7}"
           jq -n \
-            --arg title "Deployment Started" \
+            --arg title "🔄  Deployment Starting" \
             --argjson color 16760064 \
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ github.ref_name }}" \
@@ -28,17 +32,21 @@ jobs:
               title: $title,
               color: $color,
               fields: [
-                {name: "Repository", value: $repo, inline: true},
-                {name: "Branch",     value: $branch, inline: true},
-                {name: "Commit",     value: $sha, inline: true},
-                {name: "Message",    value: $msg, inline: false},
-                {name: "Triggered By", value: $actor, inline: true},
-                {name: "VPS Status", value: "Pulling latest changes...", inline: true}
+                {name: "📁 Repository",    value: $repo,   inline: true},
+                {name: "🌿 Branch",        value: $branch, inline: true},
+                {name: "🔖 Commit",        value: $sha,    inline: true},
+                {name: "📝 Message",       value: $msg,    inline: false},
+                {name: "👤 Triggered By",  value: $actor,  inline: true},
+                {name: "⚙️ VPS Status",    value: "Connecting to VPS...", inline: true}
               ],
-              footer: {text: "QUANTUMBLOX STORE"},
+              footer: {text: "QUANTUMBLOX STORE • CI/CD Pipeline"},
               timestamp: (now | todate)
-            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" \
+              -H "Content-Type: application/json" -d @-
 
+      # ─────────────────────────────────────────
+      # STEP 2 — Deploy via SSH
+      # ─────────────────────────────────────────
       - name: Deploy to VPS via SSH
         id: deploy
         uses: appleboy/ssh-action@master
@@ -46,20 +54,196 @@ jobs:
           host: ${{ secrets.VPS_IP }}
           username: root
           password: ${{ secrets.VPS_PASSWORD }}
+          # Timeout 120 detik agar tidak hang
+          command_timeout: 120s
           script: |
-            cd /root/qb-bot
-            if [ ! -d .git ]; then
-              git init
-              git remote add origin https://github.com/Raihannn02/qb-store-dc.git
-              git add .
-              git commit -m "Initial commit from VPS"
-              git branch -M main
-            fi
-            git fetch --all
-            git reset --hard origin/main
-            npm install --production
-            pm2 restart qb-bot --update-env
+            # ══════════════════════════════════════════════
+            #   QB-STORE — DEPLOYMENT SCRIPT
+            #   Dijalankan oleh GitHub Actions via SSH
+            # ══════════════════════════════════════════════
 
+            PROJECT_DIR="/root/qb-bot"
+            REPO_URL="https://github.com/Raihannn02/qb-store-dc.git"
+            BOT_NAME="qb-bot"
+            MAIN_FILE="index.js"
+
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  QB-STORE DEPLOYMENT — $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # ─────────────────────────────────────────
+            # [VALIDASI 1] Cek apakah PROJECT_DIR ada
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[1/6] Validating project directory..."
+
+            if [ ! -d "$PROJECT_DIR" ]; then
+              echo "  ⚠️  Directory '$PROJECT_DIR' tidak ditemukan."
+              echo "  ℹ️  Melakukan clone repository dari GitHub..."
+              git clone "$REPO_URL" "$PROJECT_DIR"
+              if [ $? -ne 0 ]; then
+                echo "  ❌ FATAL: git clone gagal! Periksa REPO_URL dan koneksi internet VPS."
+                exit 1
+              fi
+              echo "  ✅ Repository berhasil di-clone ke '$PROJECT_DIR'."
+            else
+              echo "  ✅ Project directory ditemukan: $PROJECT_DIR"
+            fi
+
+            # ─────────────────────────────────────────
+            # MASUK ke project directory (WAJIB)
+            # ─────────────────────────────────────────
+            cd "$PROJECT_DIR" || {
+              echo "  ❌ FATAL: Tidak bisa masuk ke '$PROJECT_DIR'."
+              exit 1
+            }
+            echo "  📂 Working directory: $(pwd)"
+
+            # ─────────────────────────────────────────
+            # [VALIDASI 2] Cek apakah .git ada
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[2/6] Validating Git repository..."
+
+            if [ ! -d ".git" ]; then
+              echo "  ⚠️  Folder '.git' tidak ditemukan di $(pwd)."
+              echo "  ℹ️  Re-initializing git repository..."
+              git init
+              git remote add origin "$REPO_URL"
+              git fetch --all
+              git checkout -b main --track origin/main 2>/dev/null || git checkout main
+              if [ $? -ne 0 ]; then
+                echo "  ❌ FATAL: Gagal setup git repository."
+                exit 1
+              fi
+            else
+              echo "  ✅ Git repository valid."
+              # Pastikan remote origin sudah benar
+              CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "none")
+              echo "  📡 Remote origin: $CURRENT_REMOTE"
+            fi
+
+            # ─────────────────────────────────────────
+            # [VALIDASI 3] Cek keberadaan package.json
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[3/6] Validating project files..."
+
+            if [ ! -f "package.json" ]; then
+              echo "  ❌ FATAL: package.json tidak ditemukan di $(pwd)!"
+              echo "  ℹ️  Pastikan project sudah benar ter-clone."
+              exit 1
+            fi
+            echo "  ✅ package.json ditemukan."
+
+            if [ ! -f "$MAIN_FILE" ]; then
+              echo "  ❌ FATAL: '$MAIN_FILE' tidak ditemukan di $(pwd)!"
+              exit 1
+            fi
+            echo "  ✅ $MAIN_FILE ditemukan."
+
+            if [ -f "ecosystem.config.js" ]; then
+              echo "  ✅ ecosystem.config.js ditemukan."
+            else
+              echo "  ℹ️  ecosystem.config.js tidak ada — akan start langsung dari index.js."
+            fi
+
+            # ─────────────────────────────────────────
+            # [STEP 4] Git Pull — Ambil commit terbaru
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[4/6] Pulling latest commit from GitHub..."
+
+            # Simpan hash commit sebelum update
+            OLD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+            echo "  📌 Commit sebelum update: $OLD_COMMIT"
+
+            git fetch --all
+            if [ $? -ne 0 ]; then
+              echo "  ❌ FATAL: git fetch gagal! Cek koneksi internet VPS."
+              exit 1
+            fi
+
+            git reset --hard origin/main
+            if [ $? -ne 0 ]; then
+              echo "  ❌ FATAL: git reset --hard gagal!"
+              exit 1
+            fi
+
+            # Tampilkan hash commit setelah update
+            NEW_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+            echo "  ✅ Git pull berhasil."
+            echo "  📌 Commit setelah update: $NEW_COMMIT"
+
+            if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then
+              echo "  ℹ️  Tidak ada perubahan kode — commit sama."
+            else
+              echo "  🆕 Update terdeteksi: $OLD_COMMIT → $NEW_COMMIT"
+            fi
+
+            # ─────────────────────────────────────────
+            # [STEP 5] Install Dependencies
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[5/6] Installing dependencies..."
+
+            npm install --omit=dev
+            if [ $? -ne 0 ]; then
+              echo "  ❌ FATAL: npm install gagal!"
+              exit 1
+            fi
+            echo "  ✅ Dependencies berhasil diinstall."
+
+            # ─────────────────────────────────────────
+            # [STEP 6] Restart Bot via PM2
+            # ─────────────────────────────────────────
+            echo ""
+            echo "[6/6] Restarting bot via PM2..."
+
+            # Cek apakah PM2 terinstall
+            if ! command -v pm2 &> /dev/null; then
+              echo "  ⚠️  PM2 tidak ditemukan! Menginstall PM2..."
+              npm install -g pm2
+            fi
+
+            # Cek apakah proses qb-bot sudah terdaftar di PM2
+            PM2_STATUS=$(pm2 describe "$BOT_NAME" 2>/dev/null | grep "status" | awk '{print $4}')
+
+            if [ -z "$PM2_STATUS" ]; then
+              echo "  ℹ️  Proses '$BOT_NAME' belum ada di PM2."
+              echo "  ℹ️  Starting fresh..."
+
+              if [ -f "ecosystem.config.js" ]; then
+                pm2 start ecosystem.config.js
+              else
+                pm2 start "$MAIN_FILE" --name "$BOT_NAME"
+              fi
+            else
+              echo "  ℹ️  PM2 status sebelumnya: $PM2_STATUS"
+              pm2 restart "$BOT_NAME" --update-env
+            fi
+
+            if [ $? -ne 0 ]; then
+              echo "  ❌ FATAL: PM2 restart gagal!"
+              exit 1
+            fi
+
+            # Simpan state PM2 agar survive VPS reboot
+            pm2 save --force
+
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  ✅ DEPLOYMENT SELESAI — $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+
+            # Tampilkan status PM2 final
+            pm2 status "$BOT_NAME"
+
+      # ─────────────────────────────────────────
+      # STEP 3 — Notify Discord: Deployment Successful
+      # ─────────────────────────────────────────
       - name: Notify Discord — Deployment Successful
         if: success()
         continue-on-error: true
@@ -69,30 +253,36 @@ jobs:
         run: |
           SHORT_SHA="${{ github.sha }}"
           SHORT_SHA="${SHORT_SHA:0:7}"
+          COMMIT_URL="https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
           jq -n \
-            --arg title "Deployment Successful" \
+            --arg title "✅  Deployment Successful" \
             --argjson color 47252 \
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ github.ref_name }}" \
             --arg sha "${SHORT_SHA}" \
             --arg msg "${COMMIT_MSG}" \
             --arg actor "${{ github.actor }}" \
+            --arg url "${COMMIT_URL}" \
             '{embeds: [{
               title: $title,
               color: $color,
               fields: [
-                {name: "Repository",  value: $repo, inline: true},
-                {name: "Branch",      value: $branch, inline: true},
-                {name: "Commit",      value: $sha, inline: true},
-                {name: "Message",     value: $msg, inline: false},
-                {name: "Deployed By", value: $actor, inline: true},
-                {name: "VPS Status",  value: "Online", inline: true},
-                {name: "Bot Status",  value: "Restarted", inline: true}
+                {name: "📁 Repository",    value: $repo,              inline: true},
+                {name: "🌿 Branch",        value: $branch,            inline: true},
+                {name: "🔖 Commit",        value: ("[`"+$sha+"`]("+$url+")"), inline: true},
+                {name: "📝 Message",       value: $msg,               inline: false},
+                {name: "👤 Deployed By",   value: $actor,             inline: true},
+                {name: "🖥️ VPS Status",    value: "Online ✅",        inline: true},
+                {name: "🤖 Bot Status",    value: "Restarted ✅",     inline: true}
               ],
-              footer: {text: "QUANTUMBLOX STORE"},
+              footer: {text: "QUANTUMBLOX STORE • CI/CD Pipeline"},
               timestamp: (now | todate)
-            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" \
+              -H "Content-Type: application/json" -d @-
 
+      # ─────────────────────────────────────────
+      # STEP 4 — Notify Discord: Deployment Failed
+      # ─────────────────────────────────────────
       - name: Notify Discord — Deployment Failed
         if: failure()
         continue-on-error: true
@@ -102,25 +292,29 @@ jobs:
         run: |
           SHORT_SHA="${{ github.sha }}"
           SHORT_SHA="${SHORT_SHA:0:7}"
+          ACTIONS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           jq -n \
-            --arg title "Deployment Failed" \
+            --arg title "❌  Deployment Failed" \
             --argjson color 15548997 \
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ github.ref_name }}" \
             --arg sha "${SHORT_SHA}" \
             --arg msg "${COMMIT_MSG}" \
             --arg actor "${{ github.actor }}" \
+            --arg logs_url "${ACTIONS_URL}" \
             '{embeds: [{
               title: $title,
               color: $color,
               fields: [
-                {name: "Repository",   value: $repo, inline: true},
-                {name: "Branch",       value: $branch, inline: true},
-                {name: "Commit",       value: $sha, inline: true},
-                {name: "Message",      value: $msg, inline: false},
-                {name: "Triggered By", value: $actor, inline: true},
-                {name: "VPS Status",   value: "Error — Manual intervention required.", inline: false}
+                {name: "📁 Repository",    value: $repo,                          inline: true},
+                {name: "🌿 Branch",        value: $branch,                        inline: true},
+                {name: "🔖 Commit",        value: $sha,                           inline: true},
+                {name: "📝 Message",       value: $msg,                           inline: false},
+                {name: "👤 Triggered By",  value: $actor,                         inline: true},
+                {name: "🖥️ VPS Status",    value: "⚠️ Error — Check logs!",      inline: true},
+                {name: "📋 Action Logs",   value: ("[View Logs]("+$logs_url+")"), inline: false}
               ],
-              footer: {text: "QUANTUMBLOX STORE"},
+              footer: {text: "QUANTUMBLOX STORE • CI/CD Pipeline"},
               timestamp: (now | todate)
-            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" -H "Content-Type: application/json" -d @-
+            }]}' | curl -s -X POST "${DISCORD_WEBHOOK}" \
+              -H "Content-Type: application/json" -d @-
