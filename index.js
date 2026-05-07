@@ -52,7 +52,10 @@ function saveConfig(data) {
 
 async function updateDatabaseEmbed(productId) {
     const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
-    if (prodError || !product) return;
+    if (prodError || !product) {
+        console.error(`[STORAGE EMBED] ❌ Product '${productId}' not found in database:`, prodError?.message || 'No data returned');
+        return;
+    }
 
     const config = loadConfig();
     const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
@@ -465,11 +468,11 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.isModalSubmit()) {
             if (interaction.customId === 'mod_p_add') {
-                const id = interaction.fields.getTextInputValue('id');
+                const id = interaction.fields.getTextInputValue('id').trim();
                 const { data: existing } = await supabase.from('products').select('id').eq('id', id).single();
                 if (existing) return interaction.reply({ content: '❌ Product with this ID already exists.', flags: [MessageFlags.Ephemeral] });
 
-                await supabase.from('products').insert([{
+                const { error: insertError } = await supabase.from('products').insert([{
                     id,
                     name: interaction.fields.getTextInputValue('name'),
                     stock: 0,
@@ -477,8 +480,17 @@ client.on('interactionCreate', async interaction => {
                     format: interaction.fields.getTextInputValue('format'),
                     description: interaction.fields.getTextInputValue('desc') || '-'
                 }]);
+
+                if (insertError) {
+                    console.error(`[PRODUCT STORAGE] ❌ Failed to save product '${id}' to database:`, insertError.message);
+                    return interaction.reply({ content: `❌ Failed to save product to database: ${insertError.message}`, flags: [MessageFlags.Ephemeral] });
+                }
+
+                console.log(`[PRODUCT STORAGE] ✅ Product '${id}' saved to database. Registering storage embed...`);
                 await interaction.reply({ content: `✅ Product \`${id}\` added successfully!`, flags: [MessageFlags.Ephemeral] });
                 updateDashboard();
+                // 🔑 FIX: Register the new product into the storage/database embed channel immediately
+                updateDatabaseEmbed(id).catch(e => console.error(`[PRODUCT STORAGE] ❌ Failed to create storage embed for '${id}':`, e.message));
             }
             else if (interaction.customId.startsWith('mod_p_edit_')) {
                 const pid = interaction.customId.replace('mod_p_edit_', '');
