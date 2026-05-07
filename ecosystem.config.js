@@ -21,10 +21,6 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       time: true,
       merge_logs: true,
-      log_type: 'json',
-      log_size: '10M',
-      log_retention: '10d',
-      max_logs: 10,
       combine_logs: true
     }
   ]
