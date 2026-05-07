@@ -1,8 +1,21 @@
 const dotenv = require('dotenv');
-dotenv.config({ debug: false });
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActivityType, MessageFlags } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  const envVars = {};
+  envContent.split('\n').forEach(line => {
+    const [key, ...valueParts] = line.split('=');
+    if (key && key.trim() && !key.trim().startsWith('#')) {
+      envVars[key.trim()] = valueParts.join('=').trim();
+    }
+  });
+  Object.assign(process.env, envVars);
+}
+
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActivityType, MessageFlags } = require('discord.js');
 const axios = require('axios');
 const supabase = require('./supabaseClient');
 const os = require('os');
@@ -15,7 +28,8 @@ const LOG_PREFIXES = {
   ERROR: '[ERROR]',
   UPDATE: '[UPDATE]',
   CACHE: '[CACHE]',
-  PRODUCT: '[PRODUCT]'
+  PRODUCT: '[PRODUCT]',
+  HEALTH: '[HEALTH]'
 };
 
 function log(prefix, message, ...args) {
@@ -47,6 +61,7 @@ const dbEmbedMessageCache = new Map();
 let dashboardMessageId = null;
 const botStartTime = Date.now();
 let reconnectAttempts = 0;
+let healthCheckInterval = null;
 
 function loadConfig() {
   try {
@@ -103,7 +118,9 @@ function getSystemStats() {
       count: cpuCount,
       loadAvg: loadAvg.toFixed(2)
     },
-    uptime
+    uptime,
+    cacheCount: dbEmbedMessageCache.size,
+    reconnectAttempts
   };
 }
 
@@ -165,6 +182,47 @@ async function validateStartup() {
   }
 
   return { errors, warnings };
+}
+
+async function runHealthCheck() {
+  log(LOG_PREFIXES.HEALTH, 'Running health check...');
+  const stats = getSystemStats();
+  let issues = [];
+
+  try {
+    const { error } = await supabase.from('products').select('id').limit(1);
+    if (error) {
+      issues.push(`Database: ${error.message}`);
+    }
+  } catch (e) {
+    issues.push(`Database: ${e.message}`);
+  }
+
+  if (stats.memory.percent > 80) {
+    issues.push(`High memory usage: ${stats.memory.percent}%`);
+  }
+
+  if (stats.cpu.loadAvg > stats.cpu.count) {
+    issues.push(`High CPU load: ${stats.cpu.loadAvg}`);
+  }
+
+  if (issues.length > 0) {
+    log(LOG_PREFIXES.HEALTH, '⚠️ Health check found issues:', issues);
+    const warningEmbed = new EmbedBuilder()
+      .setTitle('⚠️ Health Check Warning')
+      .setColor('#f39c12')
+      .setDescription('System health check detected potential issues.')
+      .addFields(
+        { name: 'Issues', value: issues.map(i => `- ${i}`).join('\n'), inline: false },
+        { name: 'Memory Usage', value: `${stats.memory.used}MB / ${stats.memory.total}MB (${stats.memory.percent}%)`, inline: true },
+        { name: 'CPU Load', value: stats.cpu.loadAvg, inline: true }
+      )
+      .setFooter({ text: 'QUANTUMBLOX STORE' })
+      .setTimestamp();
+    await sendVPSLog(warningEmbed);
+  } else {
+    log(LOG_PREFIXES.HEALTH, '✅ Health check passed');
+  }
 }
 
 async function updateDatabaseEmbed(productId) {
@@ -992,22 +1050,27 @@ client.on('resume', async (replayed) => {
   await sendVPSLog(resumeEmbed);
 });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   log(LOG_PREFIXES.SYSTEM, `Logged in as ${client.user.tag}`);
   client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
   
   await registerCommands();
 
   const validation = await validateStartup();
+  const stats = getSystemStats();
 
   const onlineEmbed = new EmbedBuilder()
-    .setTitle('🚀 Bot Online')
+    .setTitle('🚀 VPS System Online')
     .setColor(validation.errors.length > 0 ? '#e74c3c' : '#00b894')
-    .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
+    .setDescription('QB-STORE-PROJECT is now online and ready to process requests.')
     .addFields(
-      { name: 'Tag', value: client.user.tag, inline: true },
-      { name: 'Status', value: validation.errors.length > 0 ? 'Online with Errors' : 'Online', inline: true },
-      { name: 'VPS Status', value: 'Running', inline: true }
+      { name: '🤖 Bot Status', value: 'RUNNING', inline: true },
+      { name: '💻 VPS Status', value: 'ONLINE', inline: true },
+      { name: '💾 Cache Status', value: 'LOADED', inline: true },
+      { name: '📦 Storage Status', value: 'SYNCED', inline: true },
+      { name: '💾 Memory Usage', value: `${stats.memory.used}MB / ${stats.memory.total}MB (${stats.memory.percent}%)`, inline: true },
+      { name: '⏱️ Uptime', value: stats.uptime, inline: true },
+      { name: '🔄 Restart Count', value: `${reconnectAttempts}`, inline: true }
     )
     .setFooter({ text: 'QUANTUMBLOX STORE' })
     .setTimestamp();
@@ -1034,6 +1097,9 @@ client.once('ready', async () => {
 
   updateDashboard();
   setInterval(updateDashboard, 15000);
+
+  healthCheckInterval = setInterval(runHealthCheck, 5 * 60 * 1000);
+  log(LOG_PREFIXES.HEALTH, 'Health check scheduled to run every 5 minutes');
 
   log(LOG_PREFIXES.SYSTEM, 'Bot initialization complete!');
 });
