@@ -730,38 +730,50 @@ client.on('interactionCreate', async interaction => {
         const pid = interaction.values[0];
         dbEmbedMessageCache.delete(pid);
         
-        await supabase.from('stock').delete().eq('product_id', pid);
-        await supabase.from('products').delete().eq('id', pid);
-        
         try {
-          const dbChannelId = process.env.DATABASE_CHANNEL_ID;
-          if (dbChannelId) {
-            const channel = await client.channels.fetch(dbChannelId);
-            let lastMessageId = null;
-            for (let i = 0; i < 4; i++) {
-              const fetchOptions = { limit: 50 };
-              if (lastMessageId) fetchOptions.before = lastMessageId;
-              const messages = await channel.messages.fetch(fetchOptions);
-              if (messages.size === 0) break;
-              const match = messages.find(m =>
-                m.author.id === client.user.id &&
-                m.embeds.length > 0 &&
-                m.embeds[0]?.footer?.text?.includes(pid)
-              );
-              if (match) {
-                await match.delete();
-                log(LOG_PREFIXES.STORAGE, `✅ Embed storage untuk '${pid}' berhasil dihapus dari channel.`);
-                break;
-              }
-              lastMessageId = messages.last()?.id;
-            }
+          await supabase.from('pending_payments').delete().eq('product_id', pid);
+          await supabase.from('stock').delete().eq('product_id', pid);
+          const { error: prodDeleteErr } = await supabase.from('products').delete().eq('id', pid);
+          
+          if (prodDeleteErr) {
+            log(LOG_PREFIXES.ERROR, `❌ Gagal menghapus product '${pid}' dari database:`, prodDeleteErr.message);
+            return interaction.update({ content: `❌ Failed to delete product: ${prodDeleteErr.message}`, components: [] });
           }
+          
+          try {
+            const dbChannelId = process.env.DATABASE_CHANNEL_ID;
+            if (dbChannelId) {
+              const channel = await client.channels.fetch(dbChannelId);
+              let lastMessageId = null;
+              for (let i = 0; i < 4; i++) {
+                const fetchOptions = { limit: 50 };
+                if (lastMessageId) fetchOptions.before = lastMessageId;
+                const messages = await channel.messages.fetch(fetchOptions);
+                if (messages.size === 0) break;
+                const match = messages.find(m =>
+                  m.author.id === client.user.id &&
+                  m.embeds.length > 0 &&
+                  m.embeds[0]?.footer?.text?.includes(pid)
+                );
+                if (match) {
+                  await match.delete();
+                  log(LOG_PREFIXES.STORAGE, `✅ Embed storage untuk '${pid}' berhasil dihapus dari channel.`);
+                  break;
+                }
+                lastMessageId = messages.last()?.id;
+              }
+            }
+          } catch (e) {
+            log(LOG_PREFIXES.STORAGE, `⚠️ Gagal menghapus embed storage untuk '${pid}':`, e.message);
+          }
+          
+          log(LOG_PREFIXES.PRODUCT, `✅ Product '${pid}' berhasil dihapus secara permanen.`);
+          await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
+          updateDashboard();
         } catch (e) {
-          log(LOG_PREFIXES.STORAGE, `⚠️ Gagal menghapus embed storage untuk '${pid}':`, e.message);
+          log(LOG_PREFIXES.ERROR, `❌ Error saat menghapus product '${pid}':`, e.message);
+          return interaction.update({ content: `❌ Error deleting product: ${e.message}`, components: [] });
         }
-        
-        await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
-        updateDashboard();
         return;
       }
       if (interaction.customId === 'sel_buy') {
