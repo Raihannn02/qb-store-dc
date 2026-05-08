@@ -225,11 +225,14 @@ async function runHealthCheck() {
 }
 
 async function updateDatabaseEmbed(productId) {
+  log(LOG_PREFIXES.STORAGE, `🔄 updateDatabaseEmbed called for productId: '${productId}'`);
+  
   const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
   if (prodError || !product) {
     log(LOG_PREFIXES.STORAGE, `❌ Product '${productId}' not found in database:`, prodError?.message || 'No data returned');
     return;
   }
+  log(LOG_PREFIXES.STORAGE, `✅ Product '${productId}' ditemukan di database.`);
 
   const config = loadConfig();
   const dbChannelId = process.env.DATABASE_CHANNEL_ID;
@@ -239,17 +242,20 @@ async function updateDatabaseEmbed(productId) {
   }
 
   try {
+    log(LOG_PREFIXES.STORAGE, `🔍 Fetching channel database (${dbChannelId})...`);
     const channel = await client.channels.fetch(dbChannelId);
     if (!channel) {
       log(LOG_PREFIXES.STORAGE, `❌ Channel DATABASE_CHANNEL_ID (${dbChannelId}) tidak ditemukan.`);
       return;
     }
+    log(LOG_PREFIXES.STORAGE, `✅ Channel database ditemukan.`);
 
     const { data: productStock, error: stockError } = await supabase.from('stock').select('*').eq('product_id', productId).order('created_at', { ascending: false });
     if (stockError) {
-      log(LOG_PREFIXES.STORAGE, `❌ Gagal fetch stock untuk '${productId}':`, stockError.message);
+      log(LOG_PREFIXES.STORAGE, `❌ Gagal fetch stock untuk '${productId}':`, stockError.message, stockError);
       return;
     }
+    log(LOG_PREFIXES.STORAGE, `✅ Fetch stock berhasil, total items: ${productStock.length}`);
 
     const unixTime = Math.floor(Date.now() / 1000);
     const embed = new EmbedBuilder()
@@ -282,9 +288,11 @@ async function updateDatabaseEmbed(productId) {
 
     if (existingMessageId) {
       try {
+        log(LOG_PREFIXES.STORAGE, `🔍 Mencoba fetch cached messageId (${existingMessageId})...`);
         productMsg = await channel.messages.fetch(existingMessageId);
+        log(LOG_PREFIXES.STORAGE, `✅ Cached message ditemukan.`);
       } catch (fetchErr) {
-        log(LOG_PREFIXES.STORAGE, `⚠️ Cached messageId untuk '${productId}' tidak valid, melakukan scan ulang...`);
+        log(LOG_PREFIXES.STORAGE, `⚠️ Cached messageId untuk '${productId}' tidak valid (${fetchErr.message}), melakukan scan ulang...`);
         dbEmbedMessageCache.delete(productId);
         existingMessageId = null;
       }
@@ -320,15 +328,17 @@ async function updateDatabaseEmbed(productId) {
     }
 
     if (productMsg) {
+      log(LOG_PREFIXES.STORAGE, `✏️ Mengedit existing embed...`);
       await productMsg.edit({ embeds: [embed], components: [row] });
       log(LOG_PREFIXES.STORAGE, `✅ Embed untuk '${productId}' berhasil di-update.`);
     } else {
+      log(LOG_PREFIXES.STORAGE, `📤 Mengirim embed baru...`);
       const newMsg = await channel.send({ embeds: [embed], components: [row] });
       dbEmbedMessageCache.set(productId, newMsg.id);
       log(LOG_PREFIXES.STORAGE, `✅ Embed baru untuk '${productId}' berhasil dibuat (messageId: ${newMsg.id}).`);
     }
   } catch (e) {
-    log(LOG_PREFIXES.STORAGE, `❌ Database Embed Update Error untuk '${productId}':`, e.message || e);
+    log(LOG_PREFIXES.STORAGE, `❌ Database Embed Update Error untuk '${productId}':`, e.message, e.stack);
   }
 }
 
