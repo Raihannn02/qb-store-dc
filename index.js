@@ -258,20 +258,31 @@ async function updateDatabaseEmbed(productId) {
     log(LOG_PREFIXES.STORAGE, `✅ Fetch stock berhasil, total items: ${productStock.length}`);
 
     const unixTime = Math.floor(Date.now() / 1000);
+    let availableItemsValue;
+    if (productStock.length > 0) {
+      const items = productStock.slice(0, 15).map((s, i) => {
+        const safeContent = s.content.replaceAll('|', ', ').slice(0, 100);
+        const timestamp = Math.floor(new Date(s.created_at).getTime() / 1000);
+        return `**${i + 1}.** \`${safeContent}\` • <t:${timestamp}:R>`;
+      });
+      availableItemsValue = items.join('\n') + (productStock.length > 15 ? '\n*... and more*' : '');
+    } else {
+      availableItemsValue = '*No stock items found in database.*';
+    }
+    
+    if (availableItemsValue.length > 1024) {
+      availableItemsValue = availableItemsValue.slice(0, 1020) + '...';
+    }
+
     const embed = new EmbedBuilder()
       .setTitle(`🛡️ DATABASE MONITOR | ${product.name.toUpperCase()}`)
       .setDescription(`Monitoring stock entries for product ID: \`${productId}\``)
       .setColor('#C29C1D')
-      .addFields(
+      .addFields([
         { name: '⏱️ Last Update', value: `<t:${unixTime}:R>`, inline: false },
         { name: '📊 Summary', value: `> **Total Items:** \`${productStock.length}\``, inline: false },
-        {
-          name: '📦 Available Items',
-          value: productStock.length > 0
-            ? productStock.slice(0, 15).map((s, i) => `**${i + 1}.** \`${s.content.replaceAll('|', ', ')}\` • <t:${Math.floor(new Date(s.created_at).getTime() / 1000)}:R>`).join('\n') + (productStock.length > 15 ? '\n*... and more*' : '')
-            : '*No stock items found in database.*'
-        }
-      )
+        { name: '📦 Available Items', value: availableItemsValue, inline: false }
+      ])
       .setFooter({ text: `QUANTUMBLOX DATABASE SYSTEM • ${productId}` })
       .setTimestamp();
 
