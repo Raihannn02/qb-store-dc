@@ -729,7 +729,37 @@ client.on('interactionCreate', async interaction => {
       else if (interaction.customId === 'sel_p_del_pick') {
         const pid = interaction.values[0];
         dbEmbedMessageCache.delete(pid);
+        
+        await supabase.from('stock').delete().eq('product_id', pid);
         await supabase.from('products').delete().eq('id', pid);
+        
+        try {
+          const dbChannelId = process.env.DATABASE_CHANNEL_ID;
+          if (dbChannelId) {
+            const channel = await client.channels.fetch(dbChannelId);
+            let lastMessageId = null;
+            for (let i = 0; i < 4; i++) {
+              const fetchOptions = { limit: 50 };
+              if (lastMessageId) fetchOptions.before = lastMessageId;
+              const messages = await channel.messages.fetch(fetchOptions);
+              if (messages.size === 0) break;
+              const match = messages.find(m =>
+                m.author.id === client.user.id &&
+                m.embeds.length > 0 &&
+                m.embeds[0]?.footer?.text?.includes(pid)
+              );
+              if (match) {
+                await match.delete();
+                log(LOG_PREFIXES.STORAGE, `✅ Embed storage untuk '${pid}' berhasil dihapus dari channel.`);
+                break;
+              }
+              lastMessageId = messages.last()?.id;
+            }
+          }
+        } catch (e) {
+          log(LOG_PREFIXES.STORAGE, `⚠️ Gagal menghapus embed storage untuk '${pid}':`, e.message);
+        }
+        
         await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
         updateDashboard();
         return;
@@ -921,15 +951,26 @@ client.on('interactionCreate', async interaction => {
         const pid = interaction.customId.replace('mod_db_add_', '');
         const lines = interaction.fields.getTextInputValue('data').split('\n').filter(l => l.trim());
 
-        const stockToInsert = lines.map(line => ({ product_id: pid, content: line.trim() }));
-        await supabase.from('stock').insert(stockToInsert);
+        log(LOG_PREFIXES.STORAGE, `📦 Adding ${lines.length} stock items untuk product '${pid}'...`);
 
-        const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
-        await supabase.from('products').update({ stock: count.length }).eq('id', pid);
+        const stockToInsert = lines.map(line => ({ product_id: pid, content: line.trim() }));
+        const { error: insertStockErr } = await supabase.from('stock').insert(stockToInsert);
+        
+        if (insertStockErr) {
+          log(LOG_PREFIXES.ERROR, `❌ Gagal insert stock untuk '${pid}':`, insertStockErr.message);
+          return interaction.reply({ content: `❌ Failed to add stock: ${insertStockErr.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+
+        const { data: count, error: countErr } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
+        if (!countErr) {
+          await supabase.from('products').update({ stock: count.length }).eq('id', pid);
+        }
+
+        log(LOG_PREFIXES.STORAGE, `✅ Berhasil menambah ${lines.length} stock items untuk '${pid}'. Total stock sekarang: ${count?.length || lines.length}`);
 
         await interaction.reply({ content: `Added ${lines.length} items.`, flags: [MessageFlags.Ephemeral] });
-        updateDatabaseEmbed(pid);
-        updateDashboard();
+        await updateDatabaseEmbed(pid);
+        await updateDashboard();
       }
       else if (interaction.customId.startsWith('mod_db_edit||')) {
         const parts = interaction.customId.replace('mod_db_edit||', '').split('||');
