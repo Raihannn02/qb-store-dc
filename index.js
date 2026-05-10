@@ -436,20 +436,22 @@ client.on('interactionCreate', async interaction => {
             else if (interaction.customId.startsWith('btn_db_edit_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('btn_db_edit_pick_', '');
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.reply({ content: 'No stock to edit.', flags: [MessageFlags.Ephemeral] });
+                if (!stock || stock.length === 0) return interaction.editReply({ content: 'No stock to edit.' });
                 const select = new StringSelectMenuBuilder().setCustomId(`sel_db_edit_${pid}`).setPlaceholder('Select an entry');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                await interaction.reply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)], flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: 'Select entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
             }
             else if (interaction.customId.startsWith('btn_db_del_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('btn_db_del_pick_', '');
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.reply({ content: 'No stock to delete.', flags: [MessageFlags.Ephemeral] });
+                if (!stock || stock.length === 0) return interaction.editReply({ content: 'No stock to delete.' });
                 const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select to delete');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                await interaction.reply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)], flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)] });
             }
             else if (interaction.customId.startsWith('btn_check_pay_')) {
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
@@ -665,12 +667,14 @@ client.on('interactionCreate', async interaction => {
                 const pid = interaction.customId.replace('sel_db_del_', '');
                 const sid = interaction.values[0];
 
+                await interaction.deferUpdate();
+
                 await supabase.from('stock').delete().eq('id', sid);
 
                 const { data: stockCount } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
                 await supabase.from('products').update({ stock: stockCount.length }).eq('id', pid);
 
-                await interaction.update({ content: '✅ Deleted.', components: [] });
+                await interaction.editReply({ content: '✅ Deleted.', components: [] });
                 updateDatabaseEmbed(pid);
                 updateDashboard();
             }
