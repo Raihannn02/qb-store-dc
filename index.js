@@ -44,8 +44,8 @@ function safeField(name, value, inline = false) {
         return null;
     }
     return {
-        name:   n.slice(0, 256),
-        value:  v.slice(0, 1024),
+        name: n.slice(0, 256),
+        value: v.slice(0, 1024),
         inline: Boolean(inline)
     };
 }
@@ -118,7 +118,7 @@ async function sendVpsLog(title, description, color = '#e74c3c') {
 // ─────────────────────────────────────────────────────────────
 
 process.on('unhandledRejection', err => console.error('Unhandled Promise Rejection:', err));
-process.on('uncaughtException',  err => console.error('Uncaught Exception:', err));
+process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 
 // ─────────────────────────────────────────────────────────────
 // DISCORD CLIENT
@@ -227,9 +227,9 @@ async function updateDatabaseEmbed(productId) {
     // 5. Validate all fields before passing to addFields()
     const unixNow = Math.floor(Date.now() / 1000);
     const rawFields = [
-        safeField('⏱️ Last Update',     `<t:${unixNow}:R>`,                          false),
-        safeField('📊 Summary',         `> **Total Items:** \`${stockList.length}\``, false),
-        safeField('📦 Available Items', itemsValue,                                    false),
+        safeField('⏱️ Last Update', `<t:${unixNow}:R>`, false),
+        safeField('📊 Summary', `> **Total Items:** \`${stockList.length}\``, false),
+        safeField('📦 Available Items', itemsValue, false),
     ];
 
     const fields = rawFields.filter(Boolean).slice(0, 25); // Discord max: 25 fields
@@ -390,11 +390,11 @@ client.on('interactionCreate', async interaction => {
                     .setCustomId('sel_admin_menu')
                     .setPlaceholder('Choose an administrative action...')
                     .addOptions([
-                        { label: 'Add Product',        description: 'Create a new product listing',       value: 'opt_add_p',      emoji: '➕' },
-                        { label: 'Edit Product',       description: 'Update price or name of a product',  value: 'opt_edit_p',     emoji: '📝' },
-                        { label: 'Delete Product',     description: 'Remove a product from the shop',     value: 'opt_del_p',      emoji: '🗑️' },
-                        { label: 'Manual Confirm Pay', description: 'Force fulfill an order by ID',       value: 'opt_manual_pay', emoji: '✅' },
-                        { label: 'Config Dashboard',   description: 'Change title, color, or description',value: 'opt_config',     emoji: '⚙️' }
+                        { label: 'Add Product', description: 'Create a new product listing', value: 'opt_add_p', emoji: '➕' },
+                        { label: 'Edit Product', description: 'Update price or name of a product', value: 'opt_edit_p', emoji: '📝' },
+                        { label: 'Delete Product', description: 'Remove a product from the shop', value: 'opt_del_p', emoji: '🗑️' },
+                        { label: 'Manual Confirm Pay', description: 'Force fulfill an order by ID', value: 'opt_manual_pay', emoji: '✅' },
+                        { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' }
                     ]);
 
                 await interaction.reply({
@@ -469,7 +469,7 @@ client.on('interactionCreate', async interaction => {
                             return interaction.editReply({ content: '⚠️ Error deliver: Stock suddenly depleted.' });
                         }
 
-                        const deliver  = pidStock.map(s => s.content);
+                        const deliver = pidStock.map(s => s.content);
                         const stockIds = pidStock.map(s => s.id);
 
                         await supabase.from('stock').delete().in('id', stockIds);
@@ -487,15 +487,15 @@ client.on('interactionCreate', async interaction => {
                             .setColor('#00b894')
                             .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
                             .addFields(
-                                { name: 'Order ID',        value: `\`${orderId}\``,                                                inline: false },
-                                { name: 'Product',         value: pay.product_id,                                                 inline: true  },
-                                { name: 'Quantity',        value: `${pay.qty}x`,                                                  inline: true  },
-                                { name: 'Total Paid',      value: formattedAmount,                                                inline: true  },
+                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total Paid', value: formattedAmount, inline: true },
                                 { name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
                             )
                             .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
                             .setTimestamp();
-                        await interaction.user.send({ embeds: [dmEmbed] }).catch(() => {});
+                        await interaction.user.send({ embeds: [dmEmbed] }).catch(() => { });
 
                         // Ephemeral reply in channel — no item data shown
                         const replyEmbed = new EmbedBuilder()
@@ -503,10 +503,10 @@ client.on('interactionCreate', async interaction => {
                             .setColor('#00b894')
                             .setDescription('Your order has been processed. Your item(s) have been delivered to your DMs.')
                             .addFields(
-                                { name: 'Order ID',  value: `\`${orderId}\``, inline: false },
-                                { name: 'Product',   value: pay.product_id,   inline: true  },
-                                { name: 'Quantity',  value: `${pay.qty}x`,    inline: true  },
-                                { name: 'Total',     value: formattedAmount,  inline: true  }
+                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: formattedAmount, inline: true }
                             )
                             .setFooter({ text: 'QUANTUMBLOX STORE' })
                             .setTimestamp();
@@ -521,12 +521,12 @@ client.on('interactionCreate', async interaction => {
                                     .setTitle('Order Completed')
                                     .setColor('#2d3436')
                                     .addFields(
-                                        { name: 'Order ID',  value: `\`${orderId}\``,              inline: false },
-                                        { name: 'Buyer',     value: `<@${interaction.user.id}>`,   inline: true  },
-                                        { name: 'Product',   value: pay.product_id,                inline: true  },
-                                        { name: 'Quantity',  value: `${pay.qty}x`,                 inline: true  },
-                                        { name: 'Total',     value: formattedAmount,               inline: true  },
-                                        { name: 'Process',   value: 'Automatic',                   inline: true  }
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Product', value: pay.product_id, inline: true },
+                                        { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Process', value: 'Automatic', inline: true }
                                     )
                                     .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
                                     .setTimestamp()
@@ -543,12 +543,12 @@ client.on('interactionCreate', async interaction => {
                                     .setTitle('Payment Received')
                                     .setColor('#0099ff')
                                     .addFields(
-                                        { name: 'Order ID',  value: `\`${orderId}\``,              inline: false },
-                                        { name: 'Buyer',     value: `<@${interaction.user.id}>`,   inline: true  },
-                                        { name: 'Product',   value: pay.product_id,                inline: true  },
-                                        { name: 'Quantity',  value: `${pay.qty}x`,                 inline: true  },
-                                        { name: 'Total',     value: formattedAmount,               inline: true  },
-                                        { name: 'Status',    value: 'Completed',                   inline: true  }
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Product', value: pay.product_id, inline: true },
+                                        { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Status', value: 'Completed', inline: true }
                                     )
                                     .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
                                     .setTimestamp()
@@ -680,69 +680,81 @@ client.on('interactionCreate', async interaction => {
         // ── MODALS ────────────────────────────────────────────
         if (interaction.isModalSubmit()) {
             if (interaction.customId === 'mod_p_add') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const id = interaction.fields.getTextInputValue('id').trim();
                 const { data: existing } = await supabase.from('products').select('id').eq('id', id).single();
-                if (existing) return interaction.reply({ content: '❌ Product with this ID already exists.', flags: [MessageFlags.Ephemeral] });
+                if (existing) return interaction.editReply({ content: '❌ Product with this ID already exists.' });
 
                 const { error: insertError } = await supabase.from('products').insert([{
                     id,
-                    name:        interaction.fields.getTextInputValue('name'),
-                    stock:       0,
-                    price:       formatPrice(interaction.fields.getTextInputValue('price')),
-                    format:      interaction.fields.getTextInputValue('format'),
+                    name: interaction.fields.getTextInputValue('name'),
+                    stock: 0,
+                    price: formatPrice(interaction.fields.getTextInputValue('price')),
+                    format: interaction.fields.getTextInputValue('format'),
                     description: interaction.fields.getTextInputValue('desc') || '-'
                 }]);
 
                 if (insertError) {
                     console.error(`[STORAGE] ❌ Failed to save product '${id}': ${insertError.message}`);
-                    return interaction.reply({ content: `❌ Failed to save product to database: ${insertError.message}`, flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: `❌ Failed to save product to database: ${insertError.message}` });
                 }
 
                 console.log(`[STORAGE] ✅ Product '${id}' saved. Registering storage embed...`);
-                await interaction.reply({ content: `✅ Product \`${id}\` added successfully!`, flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: `✅ Product \`${id}\` added successfully!` });
                 updateDashboard();
                 updateDatabaseEmbed(id).catch(e => console.error(`[STORAGE] ❌ Failed to create storage embed for '${id}': ${e.message}`));
             }
             else if (interaction.customId.startsWith('mod_p_edit_')) {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const pid = interaction.customId.replace('mod_p_edit_', '');
 
-                await supabase.from('products').update({
-                    name:        interaction.fields.getTextInputValue('name'),
-                    price:       formatPrice(interaction.fields.getTextInputValue('price')),
-                    format:      interaction.fields.getTextInputValue('format'),
+                const { error: updateError } = await supabase.from('products').update({
+                    name: interaction.fields.getTextInputValue('name'),
+                    price: formatPrice(interaction.fields.getTextInputValue('price')),
+                    format: interaction.fields.getTextInputValue('format'),
                     description: interaction.fields.getTextInputValue('desc')
                 }).eq('id', pid);
 
-                await interaction.reply({ content: `✅ Product \`${pid}\` updated!`, flags: [MessageFlags.Ephemeral] });
+                if (updateError) {
+                    return interaction.editReply({ content: `❌ Failed to update product: ${updateError.message}` });
+                }
+
+                await interaction.editReply({ content: `✅ Product \`${pid}\` updated!` });
                 updateDashboard();
             }
             else if (interaction.customId === 'mod_config') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const config = loadConfig();
                 if (!config.embed) config.embed = {};
 
-                config.embed.title       = interaction.fields.getTextInputValue('title');
+                config.embed.title = interaction.fields.getTextInputValue('title');
                 config.embed.description = interaction.fields.getTextInputValue('desc');
-                config.embed.color       = interaction.fields.getTextInputValue('color');
-                config.embed.thumbnail   = interaction.fields.getTextInputValue('thumb');
+                config.embed.color = interaction.fields.getTextInputValue('color');
+                config.embed.thumbnail = interaction.fields.getTextInputValue('thumb');
 
                 const newIntv = parseInt(interaction.fields.getTextInputValue('intv'));
                 if (!isNaN(newIntv)) config.updateInterval = Math.max(5000, newIntv);
 
                 saveConfig(config);
-                await interaction.reply({ content: '✅ Dashboard configuration updated!', flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: '✅ Dashboard configuration updated!' });
                 updateDashboard();
             }
             else if (interaction.customId === 'mod_manual_pay') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const inv = interaction.fields.getTextInputValue('inv').trim();
                 const { data: pay } = await supabase.from('pending_payments').select('*').eq('invoice_id', inv).single();
-                if (!pay) return interaction.reply({ content: `❌ Order ID \`${inv}\` not found.`, flags: [MessageFlags.Ephemeral] });
+                if (!pay) return interaction.editReply({ content: `❌ Order ID \`${inv}\` not found.` });
 
                 const { data: prodStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
                 if (!prodStock || prodStock.length < pay.qty) {
-                    return interaction.reply({ content: '❌ Product or sufficient stock not found.', flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '❌ Product or sufficient stock not found.' });
                 }
 
-                const items    = prodStock.map(s => s.content);
+                const items = prodStock.map(s => s.content);
                 const stockIds = prodStock.map(s => s.id);
 
                 await supabase.from('stock').delete().in('id', stockIds);
@@ -761,15 +773,15 @@ client.on('interactionCreate', async interaction => {
                         .setColor('#00b894')
                         .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
                         .addFields(
-                            { name: 'Order ID',        value: `\`${inv}\``,                                                  inline: false },
-                            { name: 'Product',         value: pay.product_id,                                                 inline: true  },
-                            { name: 'Quantity',        value: `${pay.qty}x`,                                                  inline: true  },
-                            { name: 'Total Paid',      value: manualFormattedAmount,                                          inline: true  },
+                            { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                            { name: 'Product', value: pay.product_id, inline: true },
+                            { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                            { name: 'Total Paid', value: manualFormattedAmount, inline: true },
                             { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
                         )
                         .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
                         .setTimestamp();
-                    await buyer.send({ embeds: [dmEmbed] }).catch(() => {});
+                    await buyer.send({ embeds: [dmEmbed] }).catch(() => { });
                 }
 
                 const logChannel = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
@@ -779,12 +791,12 @@ client.on('interactionCreate', async interaction => {
                             .setTitle('Order Completed')
                             .setColor('#2d3436')
                             .addFields(
-                                { name: 'Order ID',  value: `\`${inv}\``,              inline: false },
-                                { name: 'Buyer',     value: `<@${pay.user_id}>`,       inline: true  },
-                                { name: 'Product',   value: pay.product_id,            inline: true  },
-                                { name: 'Quantity',  value: `${pay.qty}x`,             inline: true  },
-                                { name: 'Total',     value: manualFormattedAmount,     inline: true  },
-                                { name: 'Process',   value: 'Manual',                  inline: true  }
+                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                                { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Process', value: 'Manual', inline: true }
                             )
                             .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
                             .setTimestamp()
@@ -801,12 +813,12 @@ client.on('interactionCreate', async interaction => {
                             .setTitle('Payment Received')
                             .setColor('#0099ff')
                             .addFields(
-                                { name: 'Order ID',  value: `\`${inv}\``,              inline: false },
-                                { name: 'Buyer',     value: `<@${pay.user_id}>`,       inline: true  },
-                                { name: 'Product',   value: pay.product_id,            inline: true  },
-                                { name: 'Quantity',  value: `${pay.qty}x`,             inline: true  },
-                                { name: 'Total',     value: manualFormattedAmount,     inline: true  },
-                                { name: 'Status',    value: 'Completed (Manual)',      inline: true  }
+                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                                { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Status', value: 'Completed (Manual)', inline: true }
                             )
                             .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
                             .setTimestamp()
@@ -814,13 +826,19 @@ client.on('interactionCreate', async interaction => {
                     });
                 }
 
-                await interaction.reply({ content: `✅ Order \`${inv}\` successfully fulfilled manually!`, flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: `✅ Order \`${inv}\` successfully fulfilled manually!` });
                 updateDashboard();
                 updateDatabaseEmbed(pay.product_id);
             }
             else if (interaction.customId.startsWith('mod_db_add_')) {
-                const pid   = interaction.customId.replace('mod_db_add_', '');
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const pid = interaction.customId.replace('mod_db_add_', '');
                 const lines = interaction.fields.getTextInputValue('data').split('\n').filter(l => l.trim());
+
+                if (lines.length === 0) {
+                    return interaction.editReply({ content: '❌ No valid stock data entered.' });
+                }
 
                 console.log(`[STORAGE] 📦 Adding ${lines.length} stock item(s) for product '${pid}'...`);
 
@@ -829,7 +847,7 @@ client.on('interactionCreate', async interaction => {
 
                 if (insertStockError) {
                     console.error(`[STORAGE] ❌ Stock insert error for '${pid}': ${insertStockError.message}`);
-                    return interaction.reply({ content: `❌ Failed to add stock: ${insertStockError.message}`, flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: `❌ Failed to add stock: ${insertStockError.message}` });
                 }
 
                 const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
@@ -837,18 +855,24 @@ client.on('interactionCreate', async interaction => {
 
                 console.log(`[STORAGE] ✅ Added ${lines.length} item(s) — total stock now: ${count.length}`);
 
-                await interaction.reply({ content: `✅ Added ${lines.length} item(s) to stock.`, flags: [MessageFlags.Ephemeral] });
+                await interaction.editReply({ content: `✅ Added ${lines.length} item(s) to stock.` });
                 updateDatabaseEmbed(pid);
                 updateDashboard();
             }
             else if (interaction.customId.startsWith('mod_db_edit_')) {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const parts = interaction.customId.split('_');
-                const pid   = parts[3];
-                const sid   = parts[4];
+                const pid = parts[3];
+                const sid = parts[4];
 
-                await supabase.from('stock').update({ content: interaction.fields.getTextInputValue('data').trim() }).eq('id', sid);
+                const { error: updateStockError } = await supabase.from('stock').update({ content: interaction.fields.getTextInputValue('data').trim() }).eq('id', sid);
 
-                await interaction.reply({ content: '✅ Updated.', flags: [MessageFlags.Ephemeral] });
+                if (updateStockError) {
+                    return interaction.editReply({ content: `❌ Failed to update stock entry: ${updateStockError.message}` });
+                }
+
+                await interaction.editReply({ content: '✅ Updated.' });
                 updateDatabaseEmbed(pid);
             }
             else if (interaction.customId.startsWith('mod_buy_')) {
@@ -859,7 +883,7 @@ client.on('interactionCreate', async interaction => {
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (p.stock < qty) return interaction.reply({ content: 'No stock.', flags: [MessageFlags.Ephemeral] });
 
-                const orderId        = `INV${Date.now()}`;
+                const orderId = `INV${Date.now()}`;
                 const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
@@ -870,10 +894,10 @@ client.on('interactionCreate', async interaction => {
                 if (res?.data?.payment) {
                     await supabase.from('pending_payments').insert([{
                         invoice_id: orderId,
-                        user_id:    interaction.user.id,
+                        user_id: interaction.user.id,
                         product_id: pid,
                         qty,
-                        amount:     originalAmount,
+                        amount: originalAmount,
                         created_at: new Date().toISOString()
                     }]);
 
@@ -882,12 +906,12 @@ client.on('interactionCreate', async interaction => {
                         .setColor('#0099ff')
                         .setDescription('Scan the QR code below using a QRIS-compatible app, then click **Check Payment** to verify your transfer.')
                         .addFields(
-                            { name: 'Order ID',  value: `\`${orderId}\``,                                                                                    inline: false },
-                            { name: 'Product',   value: p.name,                                                                                               inline: true  },
-                            { name: 'Quantity',  value: `${qty}x`,                                                                                            inline: true  },
-                            { name: 'Amount',    value: `Rp. ${new Intl.NumberFormat('id-ID').format(res.data.payment.total_payment)}`,                        inline: true  },
-                            { name: 'Method',    value: 'QRIS',                                                                                               inline: true  },
-                            { name: 'Status',    value: '`Awaiting Payment`',                                                                                 inline: true  }
+                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                            { name: 'Product', value: p.name, inline: true },
+                            { name: 'Quantity', value: `${qty}x`, inline: true },
+                            { name: 'Amount', value: `Rp. ${new Intl.NumberFormat('id-ID').format(res.data.payment.total_payment)}`, inline: true },
+                            { name: 'Method', value: 'QRIS', inline: true },
+                            { name: 'Status', value: '`Awaiting Payment`', inline: true }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
                         .setFooter({ text: 'QUANTUMBLOX STORE' })
@@ -908,9 +932,13 @@ client.on('interactionCreate', async interaction => {
 
     } catch (e) {
         console.error('Interaction Error:', e);
-        if (!interaction.replied && !interaction.deferred) {
-            await interaction.reply({ content: 'Error.', flags: [MessageFlags.Ephemeral] }).catch(() => {});
-        }
+        try {
+            if (interaction.deferred) {
+                await interaction.editReply({ content: '❌ An unexpected error occurred.' });
+            } else if (!interaction.replied) {
+                await interaction.reply({ content: '❌ An unexpected error occurred.', flags: [MessageFlags.Ephemeral] });
+            }
+        } catch (_) { }
     }
 });
 
@@ -934,14 +962,14 @@ client.once('clientReady', async () => {
                     .setColor('#00b894')
                     .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
                     .addFields(
-                        { name: 'Tag',        value: client.user.tag, inline: true },
-                        { name: 'Status',     value: 'Online',        inline: true },
-                        { name: 'VPS Status', value: 'Running',       inline: true }
+                        { name: 'Tag', value: client.user.tag, inline: true },
+                        { name: 'Status', value: 'Online', inline: true },
+                        { name: 'VPS Status', value: 'Running', inline: true }
                     )
                     .setFooter({ text: 'QUANTUMBLOX STORE' })
                     .setTimestamp()
                 ]
-            }).catch(() => {});
+            }).catch(() => { });
         }
     }
 
