@@ -1,116 +1,63 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActivityType, MessageFlags } = require('discord.js');
+const {
+    Client, GatewayIntentBits, EmbedBuilder, REST, Routes,
+    ActionRowBuilder, ButtonBuilder, ButtonStyle,
+    StringSelectMenuBuilder, ModalBuilder, TextInputBuilder,
+    TextInputStyle, ActivityType, MessageFlags
+} = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const supabase = require('./supabaseClient');
 
 // ─────────────────────────────────────────────────────────────
-// HELPERS — formatPrice
+// HELPERS
 // ─────────────────────────────────────────────────────────────
 
 function formatPrice(input) {
     if (!input || input === '0') return 'Rp. 0';
     const digits = input.toString().replace(/\D/g, '');
     if (digits === '') return input;
-    const price = parseInt(digits);
-    return `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`;
+    return `Rp. ${new Intl.NumberFormat('id-ID').format(parseInt(digits))}`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// HELPERS — updateDatabaseEmbed (safe embed builder system)
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Safely cast any value to a non-empty string.
- * Returns fallback ('—') if value is null / undefined / blank.
- */
 function safeStr(val, fallback = '—') {
     if (val === null || val === undefined) return fallback;
     const s = String(val).trim();
     return s.length > 0 ? s : fallback;
 }
 
-/**
- * Build a validated embed field object.
- * Returns null if name or value would be blank — caller must filter these out.
- * Enforces Discord limits: name ≤ 256 chars, value ≤ 1024 chars.
- */
 function safeField(name, value, inline = false) {
     const n = safeStr(name);
     const v = safeStr(value);
-    if (n === '—' || v === '—') {
-        console.warn(`[STORAGE] ⚠️  Skipping invalid field — name: ${JSON.stringify(name)}, value: ${JSON.stringify(value)}`);
-        return null;
-    }
-    return {
-        name: n.slice(0, 256),
-        value: v.slice(0, 1024),
-        inline: Boolean(inline)
-    };
+    if (n === '—' || v === '—') return null;
+    return { name: n.slice(0, 256), value: v.slice(0, 1024), inline: Boolean(inline) };
 }
 
-/**
- * Convert created_at to a Unix timestamp safely.
- * Guards against new Date(null) returning epoch 0.
- * Falls back to current time on any error.
- */
 function safeUnix(createdAt) {
     try {
-        if (createdAt === null || createdAt === undefined) return Math.floor(Date.now() / 1000);
+        if (!createdAt) return Math.floor(Date.now() / 1000);
         const ts = Math.floor(new Date(createdAt).getTime() / 1000);
         return (isFinite(ts) && ts > 0) ? ts : Math.floor(Date.now() / 1000);
-    } catch {
-        return Math.floor(Date.now() / 1000);
-    }
+    } catch { return Math.floor(Date.now() / 1000); }
 }
 
-/**
- * Format a single stock row for embed display.
- * Handles missing / malformed content gracefully.
- */
 function formatStockRow(s, index) {
     const content = safeStr(s?.content, '[empty]').replaceAll('|', ', ');
     const ts = safeUnix(s?.created_at);
     return `**${index + 1}.** \`${content}\` • <t:${ts}:R>`;
 }
 
-/**
- * Run an async function up to `attempts` times with `delayMs` between retries.
- */
 async function withRetry(fn, attempts = 3, delayMs = 2000) {
     for (let i = 0; i < attempts; i++) {
-        try {
-            return await fn();
-        } catch (err) {
+        try { return await fn(); }
+        catch (err) {
             const last = i === attempts - 1;
-            console.warn(`[STORAGE] ⚠️  Attempt ${i + 1}/${attempts} failed: ${err.message}${last ? ' — giving up.' : ' — retrying...'}`);
+            console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message}${last ? ' — giving up.' : ' — retrying...'}`);
             if (!last) await new Promise(r => setTimeout(r, delayMs));
             else throw err;
         }
     }
-}
-
-/**
- * Send an error notification to VPS_LOG_CHANNEL_ID.
- * Never throws — log failures are silently swallowed.
- */
-async function sendVpsLog(title, description, color = '#e74c3c') {
-    const chanId = process.env.VPS_LOG_CHANNEL_ID;
-    if (!chanId) return;
-    try {
-        const chan = await client.channels.fetch(chanId).catch(() => null);
-        if (!chan) return;
-        await chan.send({
-            embeds: [new EmbedBuilder()
-                .setTitle(title)
-                .setDescription(description)
-                .setColor(color)
-                .setFooter({ text: 'QUANTUMBLOX STORE — Storage System' })
-                .setTimestamp()
-            ]
-        });
-    } catch { /* never let the log helper crash the caller */ }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -133,7 +80,6 @@ const client = new Client({
 });
 
 const configPath = path.join(__dirname, 'config.json');
-
 let dashboardMessageId = null;
 
 // ─────────────────────────────────────────────────────────────
@@ -142,121 +88,69 @@ let dashboardMessageId = null;
 
 function loadConfig() {
     try {
-        if (!fs.existsSync(configPath)) {
-            fs.writeFileSync(configPath, JSON.stringify({}, null, 2), 'utf8');
-        }
+        if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, JSON.stringify({}, null, 2), 'utf8');
         return JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (err) {
-        console.error('Error loading config:', err);
-        return {};
-    }
+    } catch (err) { console.error('Error loading config:', err); return {}; }
 }
 
 function saveConfig(data) {
-    try {
-        fs.writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf8');
-        return true;
-    } catch (err) {
-        console.error('Error saving config:', err);
-        return false;
-    }
+    try { fs.writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf8'); return true; }
+    catch (err) { console.error('Error saving config:', err); return false; }
 }
 
 // ─────────────────────────────────────────────────────────────
-// updateDatabaseEmbed — PATCHED
+// updateDatabaseEmbed
 // ─────────────────────────────────────────────────────────────
 
 async function updateDatabaseEmbed(productId) {
-    console.log(`[STORAGE] 🔄 updateDatabaseEmbed called for '${productId}'`);
+    console.log(`[DB EMBED] Updating embed for '${productId}'`);
 
-    // 1. Fetch product
-    const { data: product, error: prodError } = await supabase
-        .from('products').select('*').eq('id', productId).single();
-
+    const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
     if (prodError || !product) {
-        console.error(`[STORAGE] ❌ Product '${productId}' not found — ${prodError?.message || 'No data returned'}`);
+        console.error(`[DB EMBED] Product '${productId}' not found: ${prodError?.message}`);
         return;
     }
-    console.log(`[STORAGE] ✅ Product found: ${product.name}`);
 
-    // 2. Resolve channel
     const config = loadConfig();
     const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
-    if (!dbChannelId) {
-        console.warn(`[STORAGE] ⚠️  DATABASE_CHANNEL_ID not set — aborting embed update`);
-        return;
-    }
+    if (!dbChannelId) { console.warn('[DB EMBED] DATABASE_CHANNEL_ID not set.'); return; }
 
     const channel = await client.channels.fetch(dbChannelId).catch(() => null);
-    if (!channel) {
-        console.error(`[STORAGE] ❌ Channel '${dbChannelId}' not found or bot has no access`);
-        return;
-    }
-    console.log(`[STORAGE] ✅ Channel resolved: #${channel.name ?? dbChannelId}`);
+    if (!channel) { console.error(`[DB EMBED] Channel '${dbChannelId}' not accessible.`); return; }
 
-    // 3. Fetch stock
-    const { data: productStock, error: stockError } = await supabase
-        .from('stock').select('*').eq('product_id', productId)
-        .order('created_at', { ascending: false });
+    const { data: productStock, error: stockError } = await supabase.from('stock').select('*').eq('product_id', productId).order('created_at', { ascending: false });
+    if (stockError) { console.error(`[DB EMBED] Stock fetch error: ${stockError.message}`); return; }
 
-    if (stockError) {
-        console.error(`[STORAGE] ❌ Stock fetch error for '${productId}': ${stockError.message}`);
-        return;
-    }
     const stockList = productStock ?? [];
-    console.log(`[STORAGE] ✅ Stock fetched — ${stockList.length} item(s)`);
-
-    // 4. Build item list value safely
     let itemsValue;
     if (stockList.length === 0) {
         itemsValue = '*No stock items found in database.*';
     } else {
         const rows = stockList.slice(0, 15).map((s, i) => {
-            try {
-                return formatStockRow(s, i);
-            } catch (err) {
-                console.warn(`[STORAGE] ⚠️  Skipping malformed stock row [${i}]: ${err.message}`);
-                return null;
-            }
+            try { return formatStockRow(s, i); } catch { return null; }
         }).filter(Boolean);
-
         itemsValue = rows.join('\n') || '*Could not render stock items.*';
         if (stockList.length > 15) itemsValue += `\n*... and ${stockList.length - 15} more*`;
     }
 
-    // 5. Validate all fields before passing to addFields()
     const unixNow = Math.floor(Date.now() / 1000);
-    const rawFields = [
+    const fields = [
         safeField('⏱️ Last Update', `<t:${unixNow}:R>`, false),
         safeField('📊 Summary', `> **Total Items:** \`${stockList.length}\``, false),
         safeField('📦 Available Items', itemsValue, false),
-    ];
+    ].filter(Boolean);
 
-    const fields = rawFields.filter(Boolean).slice(0, 25); // Discord max: 25 fields
-    console.log(`[STORAGE] 📋 Fields validated: ${fields.length} valid, ${rawFields.length - fields.length} skipped`);
+    if (fields.length === 0) { console.error(`[DB EMBED] No valid fields for '${productId}'.`); return; }
 
-    if (fields.length === 0) {
-        console.error(`[STORAGE] ❌ Embed validation failed — no valid fields to display for '${productId}'`);
-        await sendVpsLog(
-            '⚠️ Embed Validation Failed',
-            `Product: \`${productId}\`\nAll embed fields were invalid or empty. Stock data is intact.`
-        );
-        return;
-    }
-
-    // 6. Build embed
-    const productNameSafe = safeStr(product.name, productId).toUpperCase();
     const embed = new EmbedBuilder()
-        .setTitle(`🛡️ DATABASE MONITOR | ${productNameSafe}`.slice(0, 256))
+        .setTitle(`🛡️ DATABASE MONITOR | ${safeStr(product.name, productId).toUpperCase()}`.slice(0, 256))
         .setDescription(`Monitoring stock entries for product ID: \`${productId}\``)
         .setColor('#C29C1D')
         .addFields(...fields)
         .setFooter({ text: `QUANTUMBLOX DATABASE SYSTEM • ${productId}`.slice(0, 2048) })
         .setTimestamp();
 
-    if (config.embed?.thumbnail) {
-        try { embed.setThumbnail(config.embed.thumbnail); } catch { /* invalid URL — skip */ }
-    }
+    if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
 
     const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`btn_db_add_${productId}`).setLabel('Add Stock').setEmoji('➕').setStyle(ButtonStyle.Success),
@@ -264,31 +158,16 @@ async function updateDatabaseEmbed(productId) {
         new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
     );
 
-    // 7. Send / edit with auto-retry (3 attempts, 2s gap)
     try {
         await withRetry(async () => {
             const messages = await channel.messages.fetch({ limit: 50 });
-            const existingMsg = messages.find(m =>
-                m.author.id === client.user.id &&
-                m.embeds[0]?.footer?.text?.includes(productId)
-            );
-
-            if (existingMsg) {
-                await existingMsg.edit({ embeds: [embed], components: [row] });
-                console.log(`[STORAGE] ✅ Database embed updated for '${productId}'`);
-            } else {
-                await channel.send({ embeds: [embed], components: [row] });
-                console.log(`[STORAGE] ✅ Database embed created for '${productId}'`);
-            }
+            const existing = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.footer?.text?.includes(productId));
+            if (existing) await existing.edit({ embeds: [embed], components: [row] });
+            else await channel.send({ embeds: [embed], components: [row] });
         }, 3, 2000);
-
+        console.log(`[DB EMBED] Embed updated for '${productId}'`);
     } catch (err) {
-        console.error(`[STORAGE] ❌ Embed update failed after retries for '${productId}': ${err.message}`);
-        // Fallback: notify VPS log — stock is already safe in DB
-        await sendVpsLog(
-            '⚠️ Database Embed Update Failed',
-            `Product: \`${productId}\`\nError: ${err.message}\n\nStock data is intact. Embed will resync on next update cycle.`
-        );
+        console.error(`[DB EMBED] Embed update failed for '${productId}': ${err.message}`);
     }
 }
 
@@ -297,13 +176,9 @@ async function updateDatabaseEmbed(productId) {
 // ─────────────────────────────────────────────────────────────
 
 async function registerCommands() {
-    // Slash commands are no longer used for administration.
-    // All features have been migrated to Button-Based interactions.
-    const commands = [];
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    try {
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    } catch (e) { console.error(e); }
+    try { await rest.put(Routes.applicationCommands(client.user.id), { body: [] }); }
+    catch (e) { console.error(e); }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -320,23 +195,20 @@ async function updateDashboard() {
         if (!channel) return;
 
         const embed = new EmbedBuilder()
-            .setTitle(config.embed?.title || "Shop Dashboard")
-            .setDescription(config.embed?.description || "Live stock updates.")
-            .setColor(config.embed?.color || "#2b2d31")
+            .setTitle(config.embed?.title || 'Shop Dashboard')
+            .setDescription(config.embed?.description || 'Live stock updates.')
+            .setColor(config.embed?.color || '#2b2d31')
             .setTimestamp();
 
         if (config.embed?.thumbnail) embed.setThumbnail(config.embed.thumbnail);
 
         const unixTime = Math.floor(Date.now() / 1000);
-        let fields = [{ name: "⏱️ Last Update", value: `<t:${unixTime}:R>`, inline: false }];
-
-        products.forEach(p => {
-            fields.push({
-                name: `🛒 ${p.name.toUpperCase()}`,
-                value: `>>> 📦 **Stock:** \`${p.stock}\`\n💰 **Price:** \`${p.price}\`\n📋 **Format:** \`${p.format}\`\n📝 **Info:** ${p.description}\n🆔 **ID:** ||${p.id}||`,
-                inline: false
-            });
-        });
+        const fields = [{ name: '⏱️ Last Update', value: `<t:${unixTime}:R>`, inline: false }];
+        products.forEach(p => fields.push({
+            name: `🛒 ${p.name.toUpperCase()}`,
+            value: `>>> 📦 **Stock:** \`${p.stock}\`\n💰 **Price:** \`${p.price}\`\n📋 **Format:** \`${p.format}\`\n📝 **Info:** ${p.description}\n🆔 **ID:** ||${p.id}||`,
+            inline: false
+        }));
         embed.addFields(fields);
 
         const row = new ActionRowBuilder().addComponents(
@@ -350,7 +222,7 @@ async function updateDashboard() {
                 const msg = await channel.messages.fetch(dashboardMessageId);
                 await msg.edit({ embeds: [embed], components: [row] });
                 return;
-            } catch (e) { dashboardMessageId = null; }
+            } catch { dashboardMessageId = null; }
         }
 
         const msgs = await channel.messages.fetch({ limit: 10 });
@@ -363,9 +235,7 @@ async function updateDashboard() {
             dashboardMessageId = nMsg.id;
         }
     } catch (e) {
-        if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') {
-            return;
-        }
+        if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') return;
         console.error('Dashboard Update Error:', e);
     }
 }
@@ -376,12 +246,18 @@ async function updateDashboard() {
 
 client.on('interactionCreate', async interaction => {
     try {
+
+        // ── SLASH COMMANDS (disabled) ─────────────────────────
         if (interaction.isChatInputCommand()) {
             return interaction.reply({ content: 'Slash commands are disabled. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
         }
 
-        // ── BUTTONS ──────────────────────────────────────────
+        // ═════════════════════════════════════════════════════
+        // BUTTONS
+        // ═════════════════════════════════════════════════════
         if (interaction.isButton()) {
+
+            // ── btn_admin_settings ────────────────────────────
             if (interaction.customId === 'btn_admin_settings') {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
                     return interaction.reply({ content: '❌ Only admins can access settings.', flags: [MessageFlags.Ephemeral] });
@@ -397,183 +273,234 @@ client.on('interactionCreate', async interaction => {
                         { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' }
                     ]);
 
-                await interaction.reply({
+                return interaction.reply({
                     content: '🛠️ **Admin Settings Menu**\nChoose what you would like to manage below:',
                     components: [new ActionRowBuilder().addComponents(menu)],
                     flags: [MessageFlags.Ephemeral]
                 });
-                return;
             }
 
+            // ── btn_register ──────────────────────────────────
             if (interaction.customId === 'btn_register') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (user) return interaction.reply({ content: 'Already registered!', flags: [MessageFlags.Ephemeral] });
-                await supabase.from('users').insert([{ id: interaction.user.id }]);
-                await interaction.reply({ content: 'Registered!', flags: [MessageFlags.Ephemeral] });
+                if (user) return interaction.editReply({ content: '⚠️ You are already registered!' });
+
+                const { error: insertErr } = await supabase.from('users').insert([{ id: interaction.user.id }]);
+                if (insertErr) return interaction.editReply({ content: `❌ Registration failed: ${insertErr.message}` });
+
+                return interaction.editReply({ content: '✅ Successfully registered! You can now buy products.' });
             }
-            else if (interaction.customId === 'btn_buy') {
+
+            // ── btn_buy ───────────────────────────────────────
+            if (interaction.customId === 'btn_buy') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (!user) return interaction.reply({ content: 'Register first!', flags: [MessageFlags.Ephemeral] });
+                if (!user) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
 
                 const { data: products } = await supabase.from('products').select('*').order('name');
-                if (!products || products.length === 0) return interaction.reply({ content: 'No products.', flags: [MessageFlags.Ephemeral] });
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
 
-                const s = new StringSelectMenuBuilder().setCustomId('sel_buy').setPlaceholder('Choose a product')
-                    .addOptions(products.map(x => ({ label: x.name, description: `Stock: ${x.stock} | Price: ${x.price}`, value: x.id })));
-                await interaction.reply({ components: [new ActionRowBuilder().addComponents(s)], flags: [MessageFlags.Ephemeral] });
+                const s = new StringSelectMenuBuilder()
+                    .setCustomId('sel_buy')
+                    .setPlaceholder('Choose a product to purchase...')
+                    .addOptions(products.map(x => ({
+                        label: x.name,
+                        description: `Stock: ${x.stock} | Price: ${x.price}`,
+                        value: x.id
+                    })));
+
+                return interaction.editReply({ components: [new ActionRowBuilder().addComponents(s)] });
             }
-            else if (interaction.customId.startsWith('btn_db_add_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
+
+            // ── btn_db_add_ ───────────────────────────────────
+            // NOTE: showModal cannot be called after deferReply
+            if (interaction.customId.startsWith('btn_db_add_')) {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
                 const pid = interaction.customId.replace('btn_db_add_', '');
                 const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(`Add Stock | ${pid}`);
                 modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder().setCustomId('data').setLabel('Stock Data')
-                        .setPlaceholder('Contoh: UsernameSteam|PasswordSteam|EmailAcc|PasswordAcc')
-                        .setStyle(TextInputStyle.Paragraph).setRequired(true)
+                    new TextInputBuilder()
+                        .setCustomId('data')
+                        .setLabel('Stock Data (one entry per line)')
+                        .setPlaceholder('UsernameSteam|PasswordSteam|EmailAcc|PasswordAcc')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(true)
                 ));
-                await interaction.showModal(modal);
+                return interaction.showModal(modal);
             }
-            else if (interaction.customId.startsWith('btn_db_edit_pick_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
+
+            // ── btn_db_edit_pick_ ─────────────────────────────
+            if (interaction.customId.startsWith('btn_db_edit_pick_')) {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
                 const pid = interaction.customId.replace('btn_db_edit_pick_', '');
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.editReply({ content: 'No stock to edit.' });
-                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_edit_${pid}`).setPlaceholder('Select an entry');
+                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to edit.' });
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId(`sel_db_edit_${pid}`)
+                    .setPlaceholder('Select an entry to edit...');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                await interaction.editReply({ content: 'Select entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
+
+                return interaction.editReply({ content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
             }
-            else if (interaction.customId.startsWith('btn_db_del_pick_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({ content: 'Admins only.', flags: [MessageFlags.Ephemeral] });
+
+            // ── btn_db_del_pick_ ──────────────────────────────
+            if (interaction.customId.startsWith('btn_db_del_pick_')) {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
                 const pid = interaction.customId.replace('btn_db_del_pick_', '');
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.editReply({ content: 'No stock to delete.' });
-                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select to delete');
+                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to delete.' });
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId(`sel_db_del_${pid}`)
+                    .setPlaceholder('Select an entry to delete...');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                await interaction.editReply({ content: 'Select entry:', components: [new ActionRowBuilder().addComponents(select)] });
+
+                return interaction.editReply({ content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
             }
-            else if (interaction.customId.startsWith('btn_check_pay_')) {
+
+            // ── btn_check_pay_ ────────────────────────────────
+            if (interaction.customId.startsWith('btn_check_pay_')) {
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
+
                 const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
-                if (fetchPayError || !pay) return interaction.reply({ content: 'Invalid transaction.', flags: [MessageFlags.Ephemeral] });
+                if (fetchPayError || !pay)
+                    return interaction.reply({ content: '❌ Invalid or expired transaction.', flags: [MessageFlags.Ephemeral] });
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 try {
                     const res = await axios.get(`https://app.pakasir.com/api/transactiondetail`, {
-                        params: { project: process.env.PAKASIR_SLUG, amount: pay.amount, order_id: orderId, api_key: process.env.PAKASIR_API_KEY }
+                        params: {
+                            project: process.env.PAKASIR_SLUG,
+                            amount: pay.amount,
+                            order_id: orderId,
+                            api_key: process.env.PAKASIR_API_KEY
+                        },
+                        timeout: 15000
                     });
 
                     if (res.data.transaction?.status === 'completed') {
                         const { data: pidStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
-                        if (!pidStock || pidStock.length < pay.qty) {
-                            return interaction.editReply({ content: '⚠️ Error deliver: Stock suddenly depleted.' });
-                        }
+                        if (!pidStock || pidStock.length < pay.qty)
+                            return interaction.editReply({ content: '⚠️ Payment confirmed but stock was depleted. Please contact an admin.' });
 
                         const deliver = pidStock.map(s => s.content);
                         const stockIds = pidStock.map(s => s.id);
 
                         await supabase.from('stock').delete().in('id', stockIds);
-
-                        const { data: remainingStock } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
-                        await supabase.from('products').update({ stock: remainingStock.length }).eq('id', pay.product_id);
-
+                        const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
+                        await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
                         await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
 
-                        const formattedAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+                        const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
 
-                        // DM to buyer — includes delivered items
-                        const dmEmbed = new EmbedBuilder()
-                            .setTitle('✅  Order Confirmed')
-                            .setColor('#00b894')
-                            .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
-                            .addFields(
-                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                { name: 'Product', value: pay.product_id, inline: true },
-                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total Paid', value: formattedAmount, inline: true },
-                                { name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
-                            )
-                            .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
-                            .setTimestamp();
-                        await interaction.user.send({ embeds: [dmEmbed] }).catch(() => { });
+                        // DM buyer with items
+                        await interaction.user.send({
+                            embeds: [new EmbedBuilder()
+                                .setTitle('✅  Order Confirmed').setColor('#00b894')
+                                .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
+                                .addFields(
+                                    { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                    { name: 'Product', value: pay.product_id, inline: true },
+                                    { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                    { name: 'Total Paid', value: fmt, inline: true },
+                                    { name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
+                                )
+                                .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' }).setTimestamp()
+                            ]
+                        }).catch(() => { });
 
-                        // Ephemeral reply in channel — no item data shown
-                        const replyEmbed = new EmbedBuilder()
-                            .setTitle('✅  Order Confirmed')
-                            .setColor('#00b894')
-                            .setDescription('Your order has been processed. Your item(s) have been delivered to your DMs.')
-                            .addFields(
-                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                { name: 'Product', value: pay.product_id, inline: true },
-                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total', value: formattedAmount, inline: true }
-                            )
-                            .setFooter({ text: 'QUANTUMBLOX STORE' })
-                            .setTimestamp();
-                        await interaction.editReply({ embeds: [replyEmbed] });
+                        // Ephemeral reply (no items)
+                        await interaction.editReply({
+                            embeds: [new EmbedBuilder()
+                                .setTitle('✅  Order Confirmed').setColor('#00b894')
+                                .setDescription('Your order has been processed. Your item(s) have been delivered to your DMs.')
+                                .addFields(
+                                    { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                    { name: 'Product', value: pay.product_id, inline: true },
+                                    { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                    { name: 'Total', value: fmt, inline: true }
+                                )
+                                .setFooter({ text: 'QUANTUMBLOX STORE' }).setTimestamp()
+                            ]
+                        });
 
                         // History log
-                        const logChanId = process.env.HISTORY_LOG_CHANNEL_ID;
-                        if (logChanId) {
-                            const chan = await client.channels.fetch(logChanId).catch(() => null);
-                            if (chan) chan.send({
+                        if (process.env.HISTORY_LOG_CHANNEL_ID) {
+                            const logChan = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
+                            if (logChan) logChan.send({
                                 embeds: [new EmbedBuilder()
-                                    .setTitle('Order Completed')
-                                    .setColor('#2d3436')
+                                    .setTitle('Order Completed').setColor('#2d3436')
                                     .addFields(
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                         { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
                                         { name: 'Product', value: pay.product_id, inline: true },
                                         { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Total', value: fmt, inline: true },
                                         { name: 'Process', value: 'Automatic', inline: true }
                                     )
-                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
-                                    .setTimestamp()
+                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` }).setTimestamp()
                                 ]
-                            });
+                            }).catch(() => { });
                         }
 
                         // Payment log
-                        const payLogChanId = process.env.PAYMENT_LOG_CHANNEL_ID;
-                        if (payLogChanId) {
-                            const payLogChan = await client.channels.fetch(payLogChanId).catch(() => null);
+                        if (process.env.PAYMENT_LOG_CHANNEL_ID) {
+                            const payLogChan = await client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null);
                             if (payLogChan) payLogChan.send({
                                 embeds: [new EmbedBuilder()
-                                    .setTitle('Payment Received')
-                                    .setColor('#0099ff')
+                                    .setTitle('Payment Received').setColor('#0099ff')
                                     .addFields(
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                         { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
                                         { name: 'Product', value: pay.product_id, inline: true },
                                         { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                        { name: 'Total', value: formattedAmount, inline: true },
+                                        { name: 'Total', value: fmt, inline: true },
                                         { name: 'Status', value: 'Completed', inline: true }
                                     )
-                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` })
-                                    .setTimestamp()
+                                    .setFooter({ text: `QUANTUMBLOX STORE • ${orderId}` }).setTimestamp()
                                 ]
-                            });
+                            }).catch(() => { });
                         }
 
                         updateDashboard();
                         updateDatabaseEmbed(pay.product_id);
+
                     } else {
-                        await interaction.editReply({ content: 'Not paid yet.' });
+                        return interaction.editReply({ content: '⏳ Payment not confirmed yet. Please complete the payment and try again.' });
                     }
                 } catch (e) {
                     const errMsg = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
-                    console.error('Payment Check Error:', errMsg, '| Amount:', pay.amount, '| OrderId:', orderId);
-                    await interaction.editReply({ content: `❌ Error checking payment. (${e?.response?.status || 'network error'})` });
+                    console.error('Payment Check Error:', errMsg);
+                    return interaction.editReply({ content: `❌ Error checking payment. (${e?.response?.status || 'network error'})` });
                 }
+
+                return;
             }
-            return;
+
+            return; // end isButton()
         }
 
-        // ── SELECT MENUS ─────────────────────────────────────
+        // ═════════════════════════════════════════════════════
+        // SELECT MENUS
+        // ═════════════════════════════════════════════════════
         if (interaction.isStringSelectMenu()) {
+
+            // ── sel_admin_menu ────────────────────────────────
             if (interaction.customId === 'sel_admin_menu') {
                 const choice = interaction.values[0];
 
@@ -586,30 +513,36 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('Format').setPlaceholder('e.g. Email|Pass').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                     );
-                    return await interaction.showModal(modal);
+                    return interaction.showModal(modal);
                 }
-                else if (choice === 'opt_edit_p') {
+
+                if (choice === 'opt_edit_p') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                     const { data: products } = await supabase.from('products').select('*').order('name');
-                    if (!products || products.length === 0) return interaction.reply({ content: 'No products to edit.', flags: [MessageFlags.Ephemeral] });
+                    if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products to edit.' });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_edit_pick').setPlaceholder('Select a product to edit...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
-                    return await interaction.reply({ content: '✏️ Select a product to edit:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '✏️ Select a product to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
-                else if (choice === 'opt_del_p') {
+
+                if (choice === 'opt_del_p') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                     const { data: products } = await supabase.from('products').select('*').order('name');
-                    if (!products || products.length === 0) return interaction.reply({ content: 'No products to delete.', flags: [MessageFlags.Ephemeral] });
+                    if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products to delete.' });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_del_pick').setPlaceholder('Select a product to DELETE...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
-                    return await interaction.reply({ content: '🗑️ **CAUTION**: Select a product to PERMANENTLY delete:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '🗑️ **CAUTION**: Select a product to permanently delete:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
-                else if (choice === 'opt_manual_pay') {
+
+                if (choice === 'opt_manual_pay') {
                     const modal = new ModalBuilder().setCustomId('mod_manual_pay').setTitle('✅ Manual Confirm Payment');
                     modal.addComponents(new ActionRowBuilder().addComponents(
                         new TextInputBuilder().setCustomId('inv').setLabel('Invoice / Order ID').setPlaceholder('e.g. INV123456789').setStyle(TextInputStyle.Short).setRequired(true)
                     ));
-                    return await interaction.showModal(modal);
+                    return interaction.showModal(modal);
                 }
-                else if (choice === 'opt_config') {
+
+                if (choice === 'opt_config') {
                     const config = loadConfig();
                     const modal = new ModalBuilder().setCustomId('mod_config').setTitle('⚙️ Configure Dashboard');
                     modal.addComponents(
@@ -619,78 +552,100 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumb').setLabel('Thumbnail URL').setValue(config.embed?.thumbnail || '').setStyle(TextInputStyle.Short).setRequired(false)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('intv').setLabel('Update Interval (ms)').setValue(config.updateInterval?.toString() || '15000').setStyle(TextInputStyle.Short).setRequired(false))
                     );
-                    return await interaction.showModal(modal);
+                    return interaction.showModal(modal);
                 }
+
+                return;
             }
-            else if (interaction.customId === 'sel_p_edit_pick') {
+
+            // ── sel_p_edit_pick ───────────────────────────────
+            // NOTE: showModal — must NOT defer first
+            if (interaction.customId === 'sel_p_edit_pick') {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p) return interaction.update({ content: 'Product not found.', components: [] });
+                if (!p) return interaction.update({ content: '❌ Product not found.', components: [] });
                 const modal = new ModalBuilder().setCustomId(`mod_p_edit_${pid}`).setTitle(`Edit Product | ${pid}`);
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('New Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('New Price').setValue(p.price).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('New Format').setValue(p.format).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('New Description').setValue(p.description).setStyle(TextInputStyle.Paragraph).setRequired(false))
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('New Description').setValue(p.description || '-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                 );
-                return await interaction.showModal(modal);
+                return interaction.showModal(modal);
             }
-            else if (interaction.customId === 'sel_p_del_pick') {
+
+            // ── sel_p_del_pick ────────────────────────────────
+            if (interaction.customId === 'sel_p_del_pick') {
                 const pid = interaction.values[0];
+                await interaction.deferUpdate();
                 await supabase.from('products').delete().eq('id', pid);
-                await interaction.update({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
+                await interaction.editReply({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
                 updateDashboard();
                 return;
             }
 
+            // ── sel_buy ───────────────────────────────────────
+            // NOTE: showModal — must NOT defer first
             if (interaction.customId === 'sel_buy') {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p || p.stock <= 0) return interaction.update({ content: 'Out of stock.', components: [], flags: [MessageFlags.Ephemeral] });
+                if (!p || p.stock <= 0) return interaction.update({ content: '❌ This product is out of stock.', components: [] });
                 const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle(`Buy ${p.name}`);
                 modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder().setCustomId('q').setLabel('Quantity').setStyle(TextInputStyle.Short).setRequired(true)
+                    new TextInputBuilder().setCustomId('q').setLabel('Quantity').setPlaceholder('e.g. 1').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                await interaction.showModal(modal);
+                return interaction.showModal(modal);
             }
-            else if (interaction.customId.startsWith('sel_db_edit_')) {
+
+            // ── sel_db_edit_ ──────────────────────────────────
+            // NOTE: showModal — must NOT defer first
+            if (interaction.customId.startsWith('sel_db_edit_')) {
                 const pid = interaction.customId.replace('sel_db_edit_', '');
                 const sid = interaction.values[0];
                 const { data: s } = await supabase.from('stock').select('*').eq('id', sid).single();
-                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}_${sid}`).setTitle('Edit Entry');
+                if (!s) return interaction.update({ content: '❌ Stock entry not found.', components: [] });
+                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}_${sid}`).setTitle('Edit Stock Entry');
                 modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder().setCustomId('data').setLabel('Data').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)
+                    new TextInputBuilder().setCustomId('data').setLabel('New Content').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                await interaction.showModal(modal);
+                return interaction.showModal(modal);
             }
-            else if (interaction.customId.startsWith('sel_db_del_')) {
+
+            // ── sel_db_del_ ───────────────────────────────────
+            if (interaction.customId.startsWith('sel_db_del_')) {
                 const pid = interaction.customId.replace('sel_db_del_', '');
                 const sid = interaction.values[0];
-
                 await interaction.deferUpdate();
 
-                await supabase.from('stock').delete().eq('id', sid);
+                const { error: delErr } = await supabase.from('stock').delete().eq('id', sid);
+                if (delErr) return interaction.editReply({ content: `❌ Failed to delete: ${delErr.message}`, components: [] });
 
                 const { data: stockCount } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
                 await supabase.from('products').update({ stock: stockCount.length }).eq('id', pid);
 
-                await interaction.editReply({ content: '✅ Deleted.', components: [] });
+                await interaction.editReply({ content: '✅ Stock entry deleted.', components: [] });
                 updateDatabaseEmbed(pid);
                 updateDashboard();
+                return;
             }
-            return;
+
+            return; // end isStringSelectMenu()
         }
 
-        // ── MODALS ────────────────────────────────────────────
+        // ═════════════════════════════════════════════════════
+        // MODALS
+        // ═════════════════════════════════════════════════════
         if (interaction.isModalSubmit()) {
+
+            // ── mod_p_add ─────────────────────────────────────
             if (interaction.customId === 'mod_p_add') {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                const id = interaction.fields.getTextInputValue('id').trim();
+                const id = interaction.fields.getTextInputValue('id').trim().toUpperCase();
                 const { data: existing } = await supabase.from('products').select('id').eq('id', id).single();
-                if (existing) return interaction.editReply({ content: '❌ Product with this ID already exists.' });
+                if (existing) return interaction.editReply({ content: `❌ Product ID \`${id}\` already exists.` });
 
-                const { error: insertError } = await supabase.from('products').insert([{
+                const { error: insertErr } = await supabase.from('products').insert([{
                     id,
                     name: interaction.fields.getTextInputValue('name'),
                     stock: 0,
@@ -699,38 +654,36 @@ client.on('interactionCreate', async interaction => {
                     description: interaction.fields.getTextInputValue('desc') || '-'
                 }]);
 
-                if (insertError) {
-                    console.error(`[STORAGE] ❌ Failed to save product '${id}': ${insertError.message}`);
-                    return interaction.editReply({ content: `❌ Failed to save product to database: ${insertError.message}` });
-                }
+                if (insertErr) return interaction.editReply({ content: `❌ Failed to add product: ${insertErr.message}` });
 
-                console.log(`[STORAGE] ✅ Product '${id}' saved. Registering storage embed...`);
                 await interaction.editReply({ content: `✅ Product \`${id}\` added successfully!` });
                 updateDashboard();
-                updateDatabaseEmbed(id).catch(e => console.error(`[STORAGE] ❌ Failed to create storage embed for '${id}': ${e.message}`));
+                updateDatabaseEmbed(id).catch(e => console.error(`[DB EMBED] Failed for '${id}': ${e.message}`));
+                return;
             }
-            else if (interaction.customId.startsWith('mod_p_edit_')) {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
+            // ── mod_p_edit_ ───────────────────────────────────
+            if (interaction.customId.startsWith('mod_p_edit_')) {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('mod_p_edit_', '');
 
-                const { error: updateError } = await supabase.from('products').update({
+                const { error: updateErr } = await supabase.from('products').update({
                     name: interaction.fields.getTextInputValue('name'),
                     price: formatPrice(interaction.fields.getTextInputValue('price')),
                     format: interaction.fields.getTextInputValue('format'),
-                    description: interaction.fields.getTextInputValue('desc')
+                    description: interaction.fields.getTextInputValue('desc') || '-'
                 }).eq('id', pid);
 
-                if (updateError) {
-                    return interaction.editReply({ content: `❌ Failed to update product: ${updateError.message}` });
-                }
+                if (updateErr) return interaction.editReply({ content: `❌ Failed to update product: ${updateErr.message}` });
 
                 await interaction.editReply({ content: `✅ Product \`${pid}\` updated!` });
                 updateDashboard();
+                return;
             }
-            else if (interaction.customId === 'mod_config') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
+            // ── mod_config ────────────────────────────────────
+            if (interaction.customId === 'mod_config') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const config = loadConfig();
                 if (!config.embed) config.embed = {};
 
@@ -745,169 +698,171 @@ client.on('interactionCreate', async interaction => {
                 saveConfig(config);
                 await interaction.editReply({ content: '✅ Dashboard configuration updated!' });
                 updateDashboard();
+                return;
             }
-            else if (interaction.customId === 'mod_manual_pay') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
+            // ── mod_manual_pay ────────────────────────────────
+            if (interaction.customId === 'mod_manual_pay') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const inv = interaction.fields.getTextInputValue('inv').trim();
+
                 const { data: pay } = await supabase.from('pending_payments').select('*').eq('invoice_id', inv).single();
                 if (!pay) return interaction.editReply({ content: `❌ Order ID \`${inv}\` not found.` });
 
                 const { data: prodStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
-                if (!prodStock || prodStock.length < pay.qty) {
-                    return interaction.editReply({ content: '❌ Product or sufficient stock not found.' });
-                }
+                if (!prodStock || prodStock.length < pay.qty)
+                    return interaction.editReply({ content: '❌ Insufficient stock to fulfill this order.' });
 
                 const items = prodStock.map(s => s.content);
                 const stockIds = prodStock.map(s => s.id);
 
                 await supabase.from('stock').delete().in('id', stockIds);
-
-                const { data: remainingStock } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
-                await supabase.from('products').update({ stock: remainingStock.length }).eq('id', pay.product_id);
-
+                const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
+                await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
                 await supabase.from('pending_payments').delete().eq('invoice_id', inv);
 
-                const manualFormattedAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+                const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
 
                 const buyer = await client.users.fetch(pay.user_id).catch(() => null);
                 if (buyer) {
-                    const dmEmbed = new EmbedBuilder()
-                        .setTitle('✅  Order Confirmed')
-                        .setColor('#00b894')
-                        .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
-                        .addFields(
-                            { name: 'Order ID', value: `\`${inv}\``, inline: false },
-                            { name: 'Product', value: pay.product_id, inline: true },
-                            { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                            { name: 'Total Paid', value: manualFormattedAmount, inline: true },
-                            { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
-                        )
-                        .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' })
-                        .setTimestamp();
-                    await buyer.send({ embeds: [dmEmbed] }).catch(() => { });
+                    await buyer.send({
+                        embeds: [new EmbedBuilder()
+                            .setTitle('✅  Order Confirmed').setColor('#00b894')
+                            .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
+                            .addFields(
+                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
+                                { name: 'Product', value: pay.product_id, inline: true },
+                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                                { name: 'Total Paid', value: fmt, inline: true },
+                                { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
+                            )
+                            .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' }).setTimestamp()
+                        ]
+                    }).catch(() => { });
                 }
 
-                const logChannel = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
-                if (logChannel) {
-                    await logChannel.send({
+                if (process.env.HISTORY_LOG_CHANNEL_ID) {
+                    const logChan = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
+                    if (logChan) logChan.send({
                         embeds: [new EmbedBuilder()
-                            .setTitle('Order Completed')
-                            .setColor('#2d3436')
+                            .setTitle('Order Completed').setColor('#2d3436')
                             .addFields(
                                 { name: 'Order ID', value: `\`${inv}\``, inline: false },
                                 { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
                                 { name: 'Product', value: pay.product_id, inline: true },
                                 { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Total', value: fmt, inline: true },
                                 { name: 'Process', value: 'Manual', inline: true }
                             )
-                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
-                            .setTimestamp()
+                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` }).setTimestamp()
                         ]
-                    });
+                    }).catch(() => { });
                 }
 
-                const manualPayLogChan = process.env.PAYMENT_LOG_CHANNEL_ID
-                    ? await client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null)
-                    : null;
-                if (manualPayLogChan) {
-                    await manualPayLogChan.send({
+                if (process.env.PAYMENT_LOG_CHANNEL_ID) {
+                    const payLogChan = await client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null);
+                    if (payLogChan) payLogChan.send({
                         embeds: [new EmbedBuilder()
-                            .setTitle('Payment Received')
-                            .setColor('#0099ff')
+                            .setTitle('Payment Received').setColor('#0099ff')
                             .addFields(
                                 { name: 'Order ID', value: `\`${inv}\``, inline: false },
                                 { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
                                 { name: 'Product', value: pay.product_id, inline: true },
                                 { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total', value: manualFormattedAmount, inline: true },
+                                { name: 'Total', value: fmt, inline: true },
                                 { name: 'Status', value: 'Completed (Manual)', inline: true }
                             )
-                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` })
-                            .setTimestamp()
+                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` }).setTimestamp()
                         ]
-                    });
+                    }).catch(() => { });
                 }
 
-                await interaction.editReply({ content: `✅ Order \`${inv}\` successfully fulfilled manually!` });
+                await interaction.editReply({ content: `✅ Order \`${inv}\` fulfilled manually!` });
                 updateDashboard();
                 updateDatabaseEmbed(pay.product_id);
+                return;
             }
-            else if (interaction.customId.startsWith('mod_db_add_')) {
+
+            // ── mod_db_add_ ───────────────────────────────────
+            if (interaction.customId.startsWith('mod_db_add_')) {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-
                 const pid = interaction.customId.replace('mod_db_add_', '');
-                const lines = interaction.fields.getTextInputValue('data').split('\n').filter(l => l.trim());
+                const lines = interaction.fields.getTextInputValue('data').split('\n').map(l => l.trim()).filter(Boolean);
 
-                if (lines.length === 0) {
-                    return interaction.editReply({ content: '❌ No valid stock data entered.' });
-                }
+                if (lines.length === 0) return interaction.editReply({ content: '❌ No valid stock data entered.' });
 
-                console.log(`[STORAGE] 📦 Adding ${lines.length} stock item(s) for product '${pid}'...`);
-
-                const stockToInsert = lines.map(line => ({ product_id: pid, content: line.trim() }));
-                const { error: insertStockError } = await supabase.from('stock').insert(stockToInsert);
-
-                if (insertStockError) {
-                    console.error(`[STORAGE] ❌ Stock insert error for '${pid}': ${insertStockError.message}`);
-                    return interaction.editReply({ content: `❌ Failed to add stock: ${insertStockError.message}` });
-                }
+                const { error: insertErr } = await supabase.from('stock').insert(lines.map(line => ({ product_id: pid, content: line })));
+                if (insertErr) return interaction.editReply({ content: `❌ Failed to add stock: ${insertErr.message}` });
 
                 const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
                 await supabase.from('products').update({ stock: count.length }).eq('id', pid);
 
-                console.log(`[STORAGE] ✅ Added ${lines.length} item(s) — total stock now: ${count.length}`);
-
-                await interaction.editReply({ content: `✅ Added ${lines.length} item(s) to stock.` });
+                await interaction.editReply({ content: `✅ Added ${lines.length} item(s). Total stock: ${count.length}` });
                 updateDatabaseEmbed(pid);
                 updateDashboard();
+                return;
             }
-            else if (interaction.customId.startsWith('mod_db_edit_')) {
+
+            // ── mod_db_edit_ ──────────────────────────────────
+            if (interaction.customId.startsWith('mod_db_edit_')) {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                // customId format: mod_db_edit_{pid}_{sid}
+                const without = interaction.customId.replace('mod_db_edit_', '');
+                const lastUnd = without.lastIndexOf('_');
+                const pid = without.substring(0, lastUnd);
+                const sid = without.substring(lastUnd + 1);
+                const newContent = interaction.fields.getTextInputValue('data').trim();
 
-                const parts = interaction.customId.split('_');
-                const pid = parts[3];
-                const sid = parts[4];
+                const { error: updateErr } = await supabase.from('stock').update({ content: newContent }).eq('id', sid);
+                if (updateErr) return interaction.editReply({ content: `❌ Failed to update: ${updateErr.message}` });
 
-                const { error: updateStockError } = await supabase.from('stock').update({ content: interaction.fields.getTextInputValue('data').trim() }).eq('id', sid);
-
-                if (updateStockError) {
-                    return interaction.editReply({ content: `❌ Failed to update stock entry: ${updateStockError.message}` });
-                }
-
-                await interaction.editReply({ content: '✅ Updated.' });
+                await interaction.editReply({ content: '✅ Stock entry updated.' });
                 updateDatabaseEmbed(pid);
+                return;
             }
-            else if (interaction.customId.startsWith('mod_buy_')) {
+
+            // ── mod_buy_ ──────────────────────────────────────
+            if (interaction.customId.startsWith('mod_buy_')) {
                 const pid = interaction.customId.replace('mod_buy_', '');
                 const qty = parseInt(interaction.fields.getTextInputValue('q'));
-                if (isNaN(qty) || qty <= 0) return interaction.reply({ content: 'Invalid qty.', flags: [MessageFlags.Ephemeral] });
 
+                if (isNaN(qty) || qty <= 0)
+                    return interaction.reply({ content: '❌ Invalid quantity. Please enter a positive number.', flags: [MessageFlags.Ephemeral] });
+
+                // Fetch product BEFORE deferring for early-exit replies
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (p.stock < qty) return interaction.reply({ content: 'No stock.', flags: [MessageFlags.Ephemeral] });
+                if (!p)
+                    return interaction.reply({ content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
+                if (p.stock < qty)
+                    return interaction.reply({ content: `❌ Not enough stock. Available: ${p.stock}`, flags: [MessageFlags.Ephemeral] });
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 const orderId = `INV${Date.now()}`;
                 const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
-                    project: process.env.PAKASIR_SLUG, order_id: orderId, amount: originalAmount, api_key: process.env.PAKASIR_API_KEY
-                }).catch(() => null);
+                    project: process.env.PAKASIR_SLUG,
+                    order_id: orderId,
+                    amount: originalAmount,
+                    api_key: process.env.PAKASIR_API_KEY
+                }, { timeout: 15000 }).catch(() => null);
 
-                if (res?.data?.payment) {
-                    await supabase.from('pending_payments').insert([{
-                        invoice_id: orderId,
-                        user_id: interaction.user.id,
-                        product_id: pid,
-                        qty,
-                        amount: originalAmount,
-                        created_at: new Date().toISOString()
-                    }]);
+                if (!res?.data?.payment)
+                    return interaction.editReply({ content: '❌ Failed to create payment. Please try again later.' });
 
-                    const embed = new EmbedBuilder()
-                        .setTitle('💳  Payment Invoice')
-                        .setColor('#0099ff')
+                await supabase.from('pending_payments').insert([{
+                    invoice_id: orderId,
+                    user_id: interaction.user.id,
+                    product_id: pid,
+                    qty,
+                    amount: originalAmount,
+                    created_at: new Date().toISOString()
+                }]);
+
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder()
+                        .setTitle('💳  Payment Invoice').setColor('#0099ff')
                         .setDescription('Scan the QR code below using a QRIS-compatible app, then click **Check Payment** to verify your transfer.')
                         .addFields(
                             { name: 'Order ID', value: `\`${orderId}\``, inline: false },
@@ -918,31 +873,29 @@ client.on('interactionCreate', async interaction => {
                             { name: 'Status', value: '`Awaiting Payment`', inline: true }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
-                        .setFooter({ text: 'QUANTUMBLOX STORE' })
-                        .setTimestamp();
+                        .setFooter({ text: 'QUANTUMBLOX STORE' }).setTimestamp()
+                    ],
+                    components: [new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
+                    )]
+                });
 
-                    await interaction.editReply({
-                        embeds: [embed],
-                        components: [new ActionRowBuilder().addComponents(
-                            new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
-                        )]
-                    });
-                } else {
-                    await interaction.editReply({ content: 'Payment error.' });
-                }
+                return;
             }
-            return;
+
+            return; // end isModalSubmit()
         }
 
     } catch (e) {
         console.error('Interaction Error:', e);
+        // Always respond so Discord does not show "This interaction failed"
         try {
-            if (interaction.deferred) {
-                await interaction.editReply({ content: '❌ An unexpected error occurred.' });
-            } else if (!interaction.replied) {
-                await interaction.reply({ content: '❌ An unexpected error occurred.', flags: [MessageFlags.Ephemeral] });
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply({ content: '❌ An unexpected error occurred. Please try again.' });
+            } else {
+                await interaction.reply({ content: '❌ An unexpected error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
             }
-        } catch (_) { }
+        } catch (_) { /* suppress double-reply errors */ }
     }
 });
 
@@ -955,26 +908,20 @@ client.once('clientReady', async () => {
     client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
     await registerCommands();
 
-    // VPS Log — Bot Online
-    const vpsLogChanId = process.env.VPS_LOG_CHANNEL_ID;
-    if (vpsLogChanId) {
-        const vpsLogChan = await client.channels.fetch(vpsLogChanId).catch(() => null);
-        if (vpsLogChan) {
-            vpsLogChan.send({
-                embeds: [new EmbedBuilder()
-                    .setTitle('Bot Online')
-                    .setColor('#00b894')
-                    .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
-                    .addFields(
-                        { name: 'Tag', value: client.user.tag, inline: true },
-                        { name: 'Status', value: 'Online', inline: true },
-                        { name: 'VPS Status', value: 'Running', inline: true }
-                    )
-                    .setFooter({ text: 'QUANTUMBLOX STORE' })
-                    .setTimestamp()
-                ]
-            }).catch(() => { });
-        }
+    if (process.env.VPS_LOG_CHANNEL_ID) {
+        const vpsLogChan = await client.channels.fetch(process.env.VPS_LOG_CHANNEL_ID).catch(() => null);
+        if (vpsLogChan) vpsLogChan.send({
+            embeds: [new EmbedBuilder()
+                .setTitle('Bot Online').setColor('#00b894')
+                .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
+                .addFields(
+                    { name: 'Tag', value: client.user.tag, inline: true },
+                    { name: 'Status', value: 'Online', inline: true },
+                    { name: 'VPS Status', value: 'Running', inline: true }
+                )
+                .setFooter({ text: 'QUANTUMBLOX STORE' }).setTimestamp()
+            ]
+        }).catch(() => { });
     }
 
     updateDashboard();
