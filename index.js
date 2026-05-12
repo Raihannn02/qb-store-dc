@@ -84,6 +84,25 @@ const configPath = path.join(__dirname, 'config.json');
 let dashboardMessageId = null;
 
 // ─────────────────────────────────────────────────────────────
+// BOT VERSION INFO
+// ─────────────────────────────────────────────────────────────
+
+const BOT_VERSION = {
+    version: '2.1.0',
+    codename: 'Stable',
+    date: '2026-05-12',
+    changelog: [
+        { type: 'NEW', desc: 'Automated Costumer role assignment on first purchase' },
+        { type: 'FIX', desc: 'Resolved all "This interaction failed" errors across buttons' },
+        { type: 'FIX', desc: 'Fixed showModal timeout crashes (Unknown Interaction)' },
+        { type: 'FIX', desc: 'Early interaction acknowledgment for all handlers' },
+        { type: 'SYSTEM', desc: 'Added GuildMembers intent for reliable role operations' },
+        { type: 'SYSTEM', desc: 'Real-time interaction logging for debugging' },
+        { type: 'SYSTEM', desc: 'Database monitor embeds auto-refresh on startup' },
+    ]
+};
+
+// ─────────────────────────────────────────────────────────────
 // CONFIG HELPERS
 // ─────────────────────────────────────────────────────────────
 
@@ -238,6 +257,80 @@ async function updateDashboard() {
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') return;
         console.error('Dashboard Update Error:', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// updateVersionDashboard
+// ─────────────────────────────────────────────────────────────
+
+async function updateVersionDashboard() {
+    const channelId = process.env.VPS_LOG_CHANNEL_ID;
+    if (!channelId) { console.warn('[VERSION] VPS_LOG_CHANNEL_ID not set.'); return; }
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) { console.error(`[VERSION] Channel '${channelId}' not accessible.`); return; }
+
+    const tagMap = { NEW: '`[NEW]`', FIX: '`[FIX]`', SYSTEM: '`[SYS]`' };
+    const changelogLines = BOT_VERSION.changelog.map(
+        c => `${tagMap[c.type] || '`[---]`'}  ${c.desc}`
+    ).join('\n');
+
+    const uptime = process.uptime();
+    const hrs = Math.floor(uptime / 3600);
+    const mins = Math.floor((uptime % 3600) / 60);
+    const secs = Math.floor(uptime % 60);
+    const uptimeStr = `${hrs}h ${mins}m ${secs}s`;
+
+    const embed = new EmbedBuilder()
+        .setTitle('QUANTUMBLOX STORE — Version Dashboard')
+        .setColor('#2b2d31')
+        .setDescription(
+            `**v${BOT_VERSION.version}** — ${BOT_VERSION.codename}\n` +
+            `Released: ${BOT_VERSION.date}`
+        )
+        .addFields(
+            { name: 'Changelog', value: changelogLines || 'No changes recorded.', inline: false },
+            { name: 'Bot', value: `\`${client.user.tag}\``, inline: true },
+            { name: 'Status', value: '\`Online\`', inline: true },
+            { name: 'Uptime', value: `\`${uptimeStr}\``, inline: true },
+            { name: 'Node.js', value: `\`${process.version}\``, inline: true },
+            { name: 'Platform', value: `\`${process.platform}\``, inline: true },
+            { name: 'Memory', value: `\`${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\``, inline: true }
+        )
+        .setFooter({ text: `QUANTUMBLOX STORE v${BOT_VERSION.version}` })
+        .setTimestamp();
+
+    const config = loadConfig();
+    if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
+
+    try {
+        // Find existing version dashboard message and edit it
+        const messages = await channel.messages.fetch({ limit: 20 });
+        const existing = messages.find(m =>
+            m.author.id === client.user.id &&
+            m.embeds[0]?.title?.includes('Version Dashboard')
+        );
+
+        if (existing) {
+            await existing.edit({ embeds: [embed] });
+            console.log('[VERSION] Dashboard updated (edited existing).');
+        } else {
+            // Delete old "Bot Online" embeds if any
+            const oldEmbeds = messages.filter(m =>
+                m.author.id === client.user.id &&
+                (m.embeds[0]?.title === 'Bot Online' || m.embeds[0]?.title?.includes('Bot Online'))
+            );
+            for (const [, msg] of oldEmbeds) {
+                await msg.delete().catch(() => { });
+                console.log('[VERSION] Deleted old Bot Online embed.');
+            }
+
+            await channel.send({ embeds: [embed] });
+            console.log('[VERSION] Dashboard created (new message).');
+        }
+    } catch (err) {
+        console.error(`[VERSION] Failed to update dashboard: ${err.message}`);
     }
 }
 
@@ -954,6 +1047,7 @@ client.once('clientReady', async () => {
 
     await registerCommands();
     updateDashboard();
+    updateVersionDashboard();
 
     // Refresh database monitor embeds on startup
     const { data: products } = await supabase.from('products').select('id');
@@ -966,6 +1060,8 @@ client.once('clientReady', async () => {
 
     const config = loadConfig();
     setInterval(updateDashboard, (config.updateInterval || 15000));
+    // Update version dashboard every 5 minutes (uptime refresh)
+    setInterval(updateVersionDashboard, 300000);
 });
 
 client.login(process.env.DISCORD_TOKEN);
