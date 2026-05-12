@@ -88,16 +88,16 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.3.0',
+    version: '2.3.1',
     codename: 'Shield',
-    date: '2026-05-12',
+    date: '2026-05-13',
     changelog: [
+        { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
         { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
         { type: 'NEW', desc: 'Entry Zone: Auto-assign role + logging' },
         { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
         { type: 'FIX', desc: 'Fixed showModal timeout crashes' },
-        { type: 'SYS', desc: 'Honeypot restricted-users logging system' },
-        { type: 'SYS', desc: 'Optimized server-side interaction handling' },
+        { type: 'SYS', desc: 'Honeypot real-time stats & ban tracking' },
     ]
 };
 
@@ -458,6 +458,9 @@ client.on('messageCreate', async message => {
         const banReason = `Automatic Banned User Type in Channel https://discord.com/channels/${message.guildId}/${honeypotId}`;
 
         try {
+            // Instant delete for security
+            await message.delete().catch(() => { });
+
             // Increment ban counter
             const config = loadConfig();
             config.honeypotBans = (config.honeypotBans || 0) + 1;
@@ -483,9 +486,8 @@ client.on('messageCreate', async message => {
                 }
             }
 
-            // Ban user
-            await message.member.ban({ reason: banReason });
-            await message.delete().catch(() => { });
+            // Ban user (with 1 hour message deletion redundancy)
+            await message.member.ban({ reason: banReason, deleteMessageSeconds: 3600 });
             console.log(`[HONEYPOT] Banned ${message.author.tag}. Total bans: ${config.honeypotBans}`);
 
             // Refresh warning embed to show new count and timestamp
