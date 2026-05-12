@@ -92,6 +92,7 @@ const BOT_VERSION = {
     codename: 'Shield',
     date: '2026-05-13',
     changelog: [
+        { type: 'FIX', desc: 'Interaction: Optimized response & stability (10062)' },
         { type: 'FIX', desc: 'Maintenance: Fixed products ReferenceError in purchase' },
         { type: 'NEW', desc: 'Maintenance System: Toggle per-product status' },
         { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
@@ -518,6 +519,40 @@ client.on('interactionCreate', async interaction => {
         // BUTTONS
         // ═════════════════════════════════════════════════════
         if (interaction.isButton()) {
+            // ── btn_buy ───────────────────────────────────────
+            // Move to top for fastest execution to avoid Unknown Interaction (10062)
+            if (interaction.customId === 'btn_buy') {
+                try {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                } catch (e) {
+                    if (e.code === 10062) {
+                        console.warn(`[WARN] Interaction ${interaction.id} expired or already handled before deferReply.`);
+                        return;
+                    }
+                    throw e;
+                }
+
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (!user) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
+
+                const config = loadConfig();
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
+
+                const s = new StringSelectMenuBuilder()
+                    .setCustomId('sel_buy')
+                    .setPlaceholder('Choose a product to purchase...')
+                    .addOptions(products.map(x => {
+                        const isMaint = config.maintenance?.[x.id] || false;
+                        return {
+                            label: `${x.name}${isMaint ? ' [MAINTENANCE]' : ''}`,
+                            description: isMaint ? '🛑 Product is currently under maintenance.' : `Stock: ${x.stock} | Price: ${x.price}`,
+                            value: x.id
+                        };
+                    }));
+
+                return interaction.editReply({ components: [new ActionRowBuilder().addComponents(s)] });
+            }
 
             // ── btn_admin_settings ────────────────────────────
             if (interaction.customId === 'btn_admin_settings') {
@@ -554,32 +589,6 @@ client.on('interactionCreate', async interaction => {
                 if (insertErr) return interaction.editReply({ content: `❌ Registration failed: ${insertErr.message}` });
 
                 return interaction.editReply({ content: '✅ Successfully registered! You can now buy products.' });
-            }
-
-            // ── btn_buy ───────────────────────────────────────
-            if (interaction.customId === 'btn_buy') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-
-                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (!user) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
-
-                const config = loadConfig();
-                const { data: products } = await supabase.from('products').select('*').order('name');
-                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
-
-                const s = new StringSelectMenuBuilder()
-                    .setCustomId('sel_buy')
-                    .setPlaceholder('Choose a product to purchase...')
-                    .addOptions(products.map(x => {
-                        const isMaint = config.maintenance?.[x.id] || false;
-                        return {
-                            label: `${x.name}${isMaint ? ' [MAINTENANCE]' : ''}`,
-                            description: isMaint ? '🛑 Product is currently under maintenance.' : `Stock: ${x.stock} | Price: ${x.price}`,
-                            value: x.id
-                        };
-                    }));
-
-                return interaction.editReply({ components: [new ActionRowBuilder().addComponents(s)] });
             }
 
             // ── btn_db_add_ ───────────────────────────────────
@@ -1252,15 +1261,15 @@ client.on('interactionCreate', async interaction => {
         }
 
     } catch (e) {
+        if (e.code === 10062) return; // Interaction expired/handled, skip reporting
         console.error('Interaction Error:', e);
-        // Always respond so Discord does not show "This interaction failed"
         try {
             if (interaction.deferred || interaction.replied) {
                 await interaction.editReply({ content: '❌ An unexpected error occurred. Please try again.' });
             } else {
                 await interaction.reply({ content: '❌ An unexpected error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
             }
-        } catch (_) { /* suppress double-reply errors */ }
+        } catch (_) { /* ignore errors during error reporting */ }
     }
 });
 
