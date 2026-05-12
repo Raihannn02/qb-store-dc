@@ -88,15 +88,15 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.3.1',
+    version: '2.4.0',
     codename: 'Shield',
     date: '2026-05-13',
     changelog: [
-        { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
+        { type: 'NEW', desc: 'Maintenance System: Toggle per-product status' },
         { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
-        { type: 'NEW', desc: 'Entry Zone: Auto-assign role + logging' },
+        { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
         { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
-        { type: 'FIX', desc: 'Fixed showModal timeout crashes' },
+        { type: 'SYS', desc: 'Maintenance purchase block & admin toggle' },
         { type: 'SYS', desc: 'Honeypot real-time stats & ban tracking' },
     ]
 };
@@ -161,10 +161,12 @@ async function updateDatabaseEmbed(productId) {
 
     if (fields.length === 0) { console.error(`[DB EMBED] No valid fields for '${productId}'.`); return; }
 
+    const isMaint = config.maintenance?.[productId] || false;
+
     const embed = new EmbedBuilder()
-        .setTitle(`🛡️ DATABASE MONITOR | ${safeStr(product.name, productId).toUpperCase()}`.slice(0, 256))
-        .setDescription(`Monitoring stock entries for product ID: \`${productId}\``)
-        .setColor('#C29C1D')
+        .setTitle(`🛡️ DATABASE MONITOR | ${safeStr(product.name, productId).toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`.slice(0, 256))
+        .setDescription(`Monitoring stock entries for product ID: \`${productId}\`${isMaint ? '\n⚠️ **Status:** `MAINTENANCE MODE ACTIVE` - Purchases are blocked.' : ''}`)
+        .setColor(isMaint ? '#e67e22' : '#C29C1D')
         .addFields(...fields)
         .setFooter({ text: `QUANTUMBLOX DATABASE SYSTEM • ${productId}`.slice(0, 2048) })
         .setTimestamp();
@@ -527,6 +529,7 @@ client.on('interactionCreate', async interaction => {
                     .addOptions([
                         { label: 'Add Product', description: 'Create a new product listing', value: 'opt_add_p', emoji: '➕' },
                         { label: 'Edit Product', description: 'Update price or name of a product', value: 'opt_edit_p', emoji: '📝' },
+                        { label: 'Maintenance Status', description: 'Enable/disable maintenance for products', value: 'opt_maintenance', emoji: '🛠️' },
                         { label: 'Delete Product', description: 'Remove a product from the shop', value: 'opt_del_p', emoji: '🗑️' },
                         { label: 'Manual Confirm Pay', description: 'Force fulfill an order by ID', value: 'opt_manual_pay', emoji: '✅' },
                         { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' }
@@ -559,17 +562,18 @@ client.on('interactionCreate', async interaction => {
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
                 if (!user) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
 
-                const { data: products } = await supabase.from('products').select('*').order('name');
-                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
-
+                const config = loadConfig();
                 const s = new StringSelectMenuBuilder()
                     .setCustomId('sel_buy')
                     .setPlaceholder('Choose a product to purchase...')
-                    .addOptions(products.map(x => ({
-                        label: x.name,
-                        description: `Stock: ${x.stock} | Price: ${x.price}`,
-                        value: x.id
-                    })));
+                    .addOptions(products.map(x => {
+                        const isMaint = config.maintenance?.[x.id] || false;
+                        return {
+                            label: `${x.name}${isMaint ? ' [MAINTENANCE]' : ''}`,
+                            description: isMaint ? '🛑 Product is currently under maintenance.' : `Stock: ${x.stock} | Price: ${x.price}`,
+                            value: x.id
+                        };
+                    }));
 
                 return interaction.editReply({ components: [new ActionRowBuilder().addComponents(s)] });
             }
@@ -821,6 +825,27 @@ client.on('interactionCreate', async interaction => {
                     catch (e) { console.error('[MODAL] opt_manual_pay showModal failed:', e.message); return; }
                 }
 
+                if (choice === 'opt_maintenance') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products found.' });
+
+                    const config = loadConfig();
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_p_maintenance_pick').setPlaceholder('Select a product to toggle maintenance...');
+                    products.forEach(p => {
+                        const isMaint = config.maintenance?.[p.id] || false;
+                        menu.addOptions({
+                            label: p.name,
+                            description: `ID: ${p.id} | Status: ${isMaint ? 'MAINTENANCE 🟠' : 'ACTIVE 🟢'}`,
+                            value: p.id
+                        });
+                    });
+                    return interaction.editReply({
+                        content: '🛠️ **Maintenance Manager**\nSelect a product to switch its maintenance status:',
+                        components: [new ActionRowBuilder().addComponents(menu)]
+                    });
+                }
+
                 if (choice === 'opt_config') {
                     const config = loadConfig();
                     const modal = new ModalBuilder().setCustomId('mod_config').setTitle('⚙️ Configure Dashboard');
@@ -835,6 +860,27 @@ client.on('interactionCreate', async interaction => {
                     catch (e) { console.error('[MODAL] opt_config showModal failed:', e.message); return; }
                 }
 
+                return;
+            }
+
+            // ── sel_p_maintenance_pick ────────────────────────
+            if (interaction.customId === 'sel_p_maintenance_pick') {
+                await interaction.deferUpdate();
+                const pid = interaction.values[0];
+                const config = loadConfig();
+                if (!config.maintenance) config.maintenance = {};
+
+                const newState = !config.maintenance[pid];
+                config.maintenance[pid] = newState;
+                saveConfig(config);
+
+                await interaction.editReply({
+                    content: `✅ Product \`${pid}\` is now **${newState ? 'UNDER MAINTENANCE' : 'ACTIVE'}**.`,
+                    components: []
+                });
+
+                updateDashboard();
+                updateDatabaseEmbed(pid);
                 return;
             }
 
@@ -867,6 +913,21 @@ client.on('interactionCreate', async interaction => {
             // ── sel_buy ───────────────────────────────────────
             if (interaction.customId === 'sel_buy') {
                 const pid = interaction.values[0];
+
+                // Maintenance Check
+                const config = loadConfig();
+                if (config.maintenance?.[pid]) {
+                    return interaction.reply({
+                        embeds: [new EmbedBuilder()
+                            .setTitle('🚧  Product Under Maintenance')
+                            .setColor('#e67e22')
+                            .setDescription(`We apologize, but **${pid}** is currently undergoing maintenance for system updates or stock replenishment.\n\n` +
+                                "Please check back later or contact an administrator for more information.")
+                            .setTimestamp()],
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+
                 // Show modal immediately — stock validation happens in mod_buy_ handler
                 const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle('Buy Product');
                 modal.addComponents(new ActionRowBuilder().addComponents(
