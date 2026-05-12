@@ -88,15 +88,15 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.2.0',
-    codename: 'Evolution',
+    version: '2.3.0',
+    codename: 'Shield',
     date: '2026-05-12',
     changelog: [
-        { type: 'NEW', desc: 'Entry Zone: Auto-assign role to new members' },
-        { type: 'NEW', desc: 'Entry & Leave Zone: Real-time professional logging' },
+        { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
+        { type: 'NEW', desc: 'Entry Zone: Auto-assign role + logging' },
         { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
-        { type: 'FIX', desc: 'Fixed showModal timeout crashes (Unknown Interaction)' },
-        { type: 'SYS', desc: 'Implemented Version Dashboard system' },
+        { type: 'FIX', desc: 'Fixed showModal timeout crashes' },
+        { type: 'SYS', desc: 'Honeypot restricted-users logging system' },
         { type: 'SYS', desc: 'Optimized server-side interaction handling' },
     ]
 };
@@ -392,6 +392,90 @@ client.on('guildMemberRemove', async member => {
         }
     } catch (e) {
         console.error('[LEAVE] guildMemberRemove error:', e);
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// HONEYPOT PROTECTION
+// ─────────────────────────────────────────────────────────────
+
+async function updateHoneypotWarning() {
+    const channelId = process.env.HONEYPOT_CHANNEL_ID;
+    if (!channelId) return;
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+        .setTitle('⛔ Honeypot Protection Active')
+        .setColor('#d63031')
+        .setDescription(
+            "“Don't send any message here,\n" +
+            "Unless you want to get banned ⛔”\n\n" +
+            "**System Explanation (English):**\n" +
+            "This channel is used as a security countermeasure (Honeypot) to automatically detect and ban users or automated scripts spreading phishing links, malware, or hacked Discord accounts. \n\n" +
+            "By sending a message here, you are flagged as a malicious actor and will be **permanently banned** from this server immediately. Only authorized Administrators are permitted to use this channel."
+        )
+        .setFooter({ text: 'System Security Enforcement' })
+        .setTimestamp();
+
+    try {
+        const messages = await channel.messages.fetch({ limit: 10 });
+        const existing = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Honeypot Protection'));
+        if (existing) {
+            await existing.edit({ embeds: [embed] });
+        } else {
+            // Delete all other messages in honeypot channel
+            for (const [, msg] of messages) {
+                await msg.delete().catch(() => { });
+            }
+            await channel.send({ embeds: [embed] });
+        }
+    } catch (err) {
+        console.error(`[HONEYPOT] Failed to update warning: ${err.message}`);
+    }
+}
+
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+
+    const honeypotId = process.env.HONEYPOT_CHANNEL_ID;
+    if (message.channelId === honeypotId) {
+        // Exempt Admin role
+        const adminRoleId = process.env.ADMIN_ROLE_ID;
+        if (message.member?.roles.cache.has(adminRoleId)) return;
+
+        const logChannelId = process.env.RESTRICTED_LOG_CHANNEL_ID;
+        const banReason = `Automatic Banned User Type in Channel https://discord.com/channels/${message.guildId}/${honeypotId}`;
+
+        try {
+            // Log before ban
+            if (logChannelId) {
+                const logChannel = await client.channels.fetch(logChannelId).catch(() => null);
+                if (logChannel) {
+                    const embed = new EmbedBuilder()
+                        .setTitle('🛡️ Security Enforcement: User Banned')
+                        .setColor('#d63031')
+                        .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
+                        .setDescription(`A user has been automatically banned for typing in the restricted protection channel.`)
+                        .addFields(
+                            { name: 'User', value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true },
+                            { name: 'Channel', value: `<#${honeypotId}>`, inline: true },
+                            { name: 'Reason', value: `\`Honeypot Triggered\``, inline: false },
+                            { name: 'Message Content', value: `\`\`\`${message.content.substring(0, 500) || '(Empty)'}\`\`\`` }
+                        )
+                        .setTimestamp();
+                    await logChannel.send({ embeds: [embed] }).catch(() => { });
+                }
+            }
+
+            // Ban user
+            await message.member.ban({ reason: banReason });
+            await message.delete().catch(() => { });
+            console.log(`[HONEYPOT] Banned ${message.author.tag} for typing in honeypot.`);
+        } catch (err) {
+            console.error(`[HONEYPOT] Failed to ban user: ${err.message}`);
+        }
     }
 });
 
@@ -1109,6 +1193,7 @@ client.once('clientReady', async () => {
     await registerCommands();
     updateDashboard();
     updateVersionDashboard();
+    updateHoneypotWarning();
 
     // Refresh database monitor embeds on startup
     const { data: products } = await supabase.from('products').select('id');
