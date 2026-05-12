@@ -333,7 +333,8 @@ client.on('interactionCreate', async interaction => {
                         .setStyle(TextInputStyle.Paragraph)
                         .setRequired(true)
                 ));
-                return interaction.showModal(modal);
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] btn_db_add showModal failed:', e.message); return; }
             }
 
             // ── btn_db_edit_pick_ ─────────────────────────────
@@ -532,7 +533,8 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('Format').setPlaceholder('e.g. Email|Pass').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                     );
-                    return interaction.showModal(modal);
+                    try { return await interaction.showModal(modal); }
+                    catch (e) { console.error('[MODAL] opt_add_p showModal failed:', e.message); return; }
                 }
 
                 if (choice === 'opt_edit_p') {
@@ -558,7 +560,8 @@ client.on('interactionCreate', async interaction => {
                     modal.addComponents(new ActionRowBuilder().addComponents(
                         new TextInputBuilder().setCustomId('inv').setLabel('Invoice / Order ID').setPlaceholder('e.g. INV123456789').setStyle(TextInputStyle.Short).setRequired(true)
                     ));
-                    return interaction.showModal(modal);
+                    try { return await interaction.showModal(modal); }
+                    catch (e) { console.error('[MODAL] opt_manual_pay showModal failed:', e.message); return; }
                 }
 
                 if (choice === 'opt_config') {
@@ -571,14 +574,14 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumb').setLabel('Thumbnail URL').setValue(config.embed?.thumbnail || '').setStyle(TextInputStyle.Short).setRequired(false)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('intv').setLabel('Update Interval (ms)').setValue(config.updateInterval?.toString() || '15000').setStyle(TextInputStyle.Short).setRequired(false))
                     );
-                    return interaction.showModal(modal);
+                    try { return await interaction.showModal(modal); }
+                    catch (e) { console.error('[MODAL] opt_config showModal failed:', e.message); return; }
                 }
 
                 return;
             }
 
             // ── sel_p_edit_pick ───────────────────────────────
-            // NOTE: showModal — must NOT defer first
             if (interaction.customId === 'sel_p_edit_pick') {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
@@ -590,7 +593,8 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('New Format').setValue(p.format).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('New Description').setValue(p.description || '-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                 );
-                return interaction.showModal(modal);
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] sel_p_edit_pick showModal failed:', e.message); return; }
             }
 
             // ── sel_p_del_pick ────────────────────────────────
@@ -604,20 +608,18 @@ client.on('interactionCreate', async interaction => {
             }
 
             // ── sel_buy ───────────────────────────────────────
-            // NOTE: showModal — must NOT defer first
             if (interaction.customId === 'sel_buy') {
                 const pid = interaction.values[0];
-                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p || p.stock <= 0) return interaction.update({ content: '❌ This product is out of stock.', components: [] });
-                const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle(`Buy ${p.name}`);
+                // Show modal immediately — stock validation happens in mod_buy_ handler
+                const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle('Buy Product');
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('q').setLabel('Quantity').setPlaceholder('e.g. 1').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                return interaction.showModal(modal);
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] sel_buy showModal failed:', e.message); return; }
             }
 
             // ── sel_db_edit_ ──────────────────────────────────
-            // NOTE: showModal — must NOT defer first
             if (interaction.customId.startsWith('sel_db_edit_')) {
                 const pid = interaction.customId.replace('sel_db_edit_', '');
                 const sid = interaction.values[0];
@@ -627,7 +629,8 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('data').setLabel('New Content').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                return interaction.showModal(modal);
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] sel_db_edit showModal failed:', e.message); return; }
             }
 
             // ── sel_db_del_ ───────────────────────────────────
