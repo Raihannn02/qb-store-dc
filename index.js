@@ -92,6 +92,7 @@ const BOT_VERSION = {
     codename: 'Shield',
     date: '2026-05-13',
     changelog: [
+        { type: 'FIX', desc: 'Maintenance: Fixed products ReferenceError in purchase' },
         { type: 'NEW', desc: 'Maintenance System: Toggle per-product status' },
         { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
         { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
@@ -563,6 +564,9 @@ client.on('interactionCreate', async interaction => {
                 if (!user) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
 
                 const config = loadConfig();
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
+
                 const s = new StringSelectMenuBuilder()
                     .setCustomId('sel_buy')
                     .setPlaceholder('Choose a product to purchase...')
