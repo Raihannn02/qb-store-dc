@@ -265,8 +265,8 @@ async function updateDashboard() {
 // ─────────────────────────────────────────────────────────────
 
 async function updateVersionDashboard() {
-    const channelId = process.env.VPS_LOG_CHANNEL_ID;
-    if (!channelId) { console.warn('[VERSION] VPS_LOG_CHANNEL_ID not set.'); return; }
+    const channelId = process.env.VERSION_CHANNEL_ID;
+    if (!channelId) { console.warn('[VERSION] VERSION_CHANNEL_ID not set.'); return; }
 
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) { console.error(`[VERSION] Channel '${channelId}' not accessible.`); return; }
