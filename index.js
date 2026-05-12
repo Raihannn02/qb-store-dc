@@ -75,7 +75,8 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
     ]
 });
 
@@ -246,6 +247,7 @@ async function updateDashboard() {
 
 client.on('interactionCreate', async interaction => {
     try {
+        console.log(`[INTERACTION] ${interaction.user.tag} (${interaction.user.id}) triggered ${interaction.type} (ID: ${interaction.customId || "N/A"})`);
 
         // ── SLASH COMMANDS (disabled) ─────────────────────────
         if (interaction.isChatInputCommand()) {
@@ -374,13 +376,12 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_check_pay_ ────────────────────────────────
             if (interaction.customId.startsWith('btn_check_pay_')) {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
 
                 const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
                 if (fetchPayError || !pay)
-                    return interaction.reply({ content: '❌ Invalid or expired transaction.', flags: [MessageFlags.Ephemeral] });
-
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '❌ Invalid or expired transaction.' });
 
                 try {
                     const res = await axios.get(`https://app.pakasir.com/api/transactiondetail`, {
@@ -505,6 +506,11 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // Unhandled button
+            console.warn(`[WARN] Unhandled button interaction: ${interaction.customId}`);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: '❌ Button handler not found.', flags: [MessageFlags.Ephemeral] });
+            }
             return; // end isButton()
         }
 
@@ -642,6 +648,11 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // Unhandled select menu
+            console.warn(`[WARN] Unhandled select menu interaction: ${interaction.customId}`);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: '❌ Select menu handler not found.', flags: [MessageFlags.Ephemeral] });
+            }
             return; // end isStringSelectMenu()
         }
 
@@ -853,20 +864,19 @@ client.on('interactionCreate', async interaction => {
 
             // ── mod_buy_ ──────────────────────────────────────
             if (interaction.customId.startsWith('mod_buy_')) {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const pid = interaction.customId.replace('mod_buy_', '');
                 const qty = parseInt(interaction.fields.getTextInputValue('q'));
 
                 if (isNaN(qty) || qty <= 0)
-                    return interaction.reply({ content: '❌ Invalid quantity. Please enter a positive number.', flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '❌ Invalid quantity. Please enter a positive number.' });
 
-                // Fetch product BEFORE deferring for early-exit replies
+                // Fetch product
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p)
-                    return interaction.reply({ content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: '❌ Product not found.' });
                 if (p.stock < qty)
-                    return interaction.reply({ content: `❌ Not enough stock. Available: ${p.stock}`, flags: [MessageFlags.Ephemeral] });
-
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    return interaction.editReply({ content: `❌ Not enough stock. Available: ${p.stock}` });
 
                 const orderId = `INV${Date.now()}`;
                 const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
@@ -929,37 +939,29 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
+
 // ─────────────────────────────────────────────────────────────
 // CLIENT READY
 // ─────────────────────────────────────────────────────────────
 
-client.once('clientReady', async () => {
-    console.log(`Logged in as ${client.user.tag}`);
-    client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
-    await registerCommands();
+client.once('ready', async () => {
+    console.log(`[READY] Bot is online as ${client.user.tag}`);
+    console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
 
-    if (process.env.VPS_LOG_CHANNEL_ID) {
-        const vpsLogChan = await client.channels.fetch(process.env.VPS_LOG_CHANNEL_ID).catch(() => null);
-        if (vpsLogChan) vpsLogChan.send({
-            embeds: [new EmbedBuilder()
-                .setTitle('Bot Online').setColor('#00b894')
-                .setDescription('The bot has successfully connected to Discord and is ready to process requests.')
-                .addFields(
-                    { name: 'Tag', value: client.user.tag, inline: true },
-                    { name: 'Status', value: 'Online', inline: true },
-                    { name: 'VPS Status', value: 'Running', inline: true }
-                )
-                .setFooter({ text: 'QUANTUMBLOX STORE' }).setTimestamp()
-            ]
-        }).catch(() => { });
+    await registerCommands();
+    updateDashboard();
+
+    // Refresh database monitor embeds on startup
+    const { data: products } = await supabase.from('products').select('id');
+    if (products) {
+        console.log(`[READY] Refreshing ${products.length} product embeds...`);
+        for (const p of products) {
+            updateDatabaseEmbed(p.id).catch(e => console.error(`[READY] Failed to update ${p.id}:`, e.message));
+        }
     }
 
-    updateDashboard();
-    setInterval(updateDashboard, 15000);
+    const config = loadConfig();
+    setInterval(updateDashboard, (config.updateInterval || 15000));
 });
-
-// ─────────────────────────────────────────────────────────────
-// LOGIN
-// ─────────────────────────────────────────────────────────────
 
 client.login(process.env.DISCORD_TOKEN);
