@@ -944,9 +944,10 @@ client.on('interactionCreate', async interaction => {
 // CLIENT READY
 // ─────────────────────────────────────────────────────────────
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`[READY] Bot is online as ${client.user.tag}`);
     console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
+    client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
 
     await registerCommands();
     updateDashboard();
