@@ -477,6 +477,19 @@ client.on('interactionCreate', async interaction => {
                             }).catch(() => { });
                         }
 
+                        // Give Costumer Role
+                        const costumerRoleId = process.env.COSTUMER_ROLE_ID;
+                        if (costumerRoleId && interaction.member) {
+                            try {
+                                if (!interaction.member.roles.cache.has(costumerRoleId)) {
+                                    await interaction.member.roles.add(costumerRoleId);
+                                    console.log(`[ROLE] Added Costumer role to ${interaction.user.tag}`);
+                                }
+                            } catch (roleErr) {
+                                console.error(`[ROLE] Failed to add Costumer role: ${roleErr.message}`);
+                            }
+                        }
+
                         updateDashboard();
                         updateDatabaseEmbed(pay.product_id);
 
@@ -775,6 +788,23 @@ client.on('interactionCreate', async interaction => {
                             .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` }).setTimestamp()
                         ]
                     }).catch(() => { });
+                }
+
+                // Give Costumer Role
+                const costumerRoleId = process.env.COSTUMER_ROLE_ID;
+                if (costumerRoleId) {
+                    try {
+                        const guild = interaction.guild;
+                        if (guild) {
+                            const member = await guild.members.fetch(pay.user_id).catch(() => null);
+                            if (member && !member.roles.cache.has(costumerRoleId)) {
+                                await member.roles.add(costumerRoleId);
+                                console.log(`[ROLE] Added Costumer role to ${member.user.tag} (Manual)`);
+                            }
+                        }
+                    } catch (roleErr) {
+                        console.error(`[ROLE] Failed to add Costumer role manually: ${roleErr.message}`);
+                    }
                 }
 
                 await interaction.editReply({ content: `✅ Order \`${inv}\` fulfilled manually!` });
