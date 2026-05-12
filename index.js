@@ -335,6 +335,68 @@ async function updateVersionDashboard() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ENTRY & LEAVE ZONE
+// ─────────────────────────────────────────────────────────────
+
+client.on('guildMemberAdd', async member => {
+    try {
+        const roleId = process.env.ENTRY_ROLE_ID;
+        const channelId = process.env.ENTRY_LOG_CHANNEL_ID;
+
+        // Give Entry Role
+        if (roleId) {
+            await member.roles.add(roleId).catch(e => console.error(`[ENTRY] Failed to add role to ${member.user.tag}: ${e.message}`));
+        }
+
+        // Send Log
+        if (channelId) {
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setTitle('Member Joined')
+                    .setColor('#00b894')
+                    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+                    .setDescription(`Welcome to the server, ${member}!`)
+                    .addFields(
+                        { name: 'User', value: `${member.user.tag} (\`${member.user.id}\`)`, inline: true },
+                        { name: 'Account Created', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true }
+                    )
+                    .setFooter({ text: `Total Members: ${member.guild.memberCount}` })
+                    .setTimestamp();
+                await channel.send({ embeds: [embed] }).catch(() => { });
+            }
+        }
+    } catch (e) {
+        console.error('[ENTRY] guildMemberAdd error:', e);
+    }
+});
+
+client.on('guildMemberRemove', async member => {
+    try {
+        const channelId = process.env.ENTRY_LOG_CHANNEL_ID;
+        if (channelId) {
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setTitle('Member Left')
+                    .setColor('#d63031')
+                    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+                    .setDescription(`${member.user.tag} has left the server.`)
+                    .addFields(
+                        { name: 'User', value: `${member.user.tag} (\`${member.user.id}\`)`, inline: true },
+                        { name: 'Joined Server', value: member.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'Unknown', inline: true }
+                    )
+                    .setFooter({ text: `Total Members: ${member.guild.memberCount}` })
+                    .setTimestamp();
+                await channel.send({ embeds: [embed] }).catch(() => { });
+            }
+        }
+    } catch (e) {
+        console.error('[LEAVE] guildMemberRemove error:', e);
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
 // INTERACTION HANDLER
 // ─────────────────────────────────────────────────────────────
 
