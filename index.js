@@ -88,10 +88,13 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.4.1',
-    codename: 'Performance+',
+    version: '2.5.0',
+    codename: 'Permanent Shield',
     date: '2026-05-13',
     changelog: [
+        { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
+        { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
+        { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
         { type: 'FIX', desc: 'Optimization: Full-system interaction response speedup' },
         { type: 'NEW', desc: 'Caching: Memory-based config loading (Zero Disk I/O)' },
         { type: 'FIX', desc: 'Parallelism: Supabase queries now run concurrently' },
@@ -110,20 +113,18 @@ const BOT_VERSION = {
 // CONFIG HELPERS
 // ─────────────────────────────────────────────────────────────
 
-let cachedConfig = null;
 function loadConfig() {
-    if (cachedConfig) return cachedConfig;
     try {
-        if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, JSON.stringify({}, null, 2), 'utf8');
-        cachedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        return cachedConfig;
+        if (!fs.existsSync(configPath)) return {};
+        const data = fs.readFileSync(configPath, 'utf8');
+        return JSON.parse(data);
     } catch (err) { console.error('Error loading config:', err); return {}; }
 }
 
 function saveConfig(data) {
     try {
         fs.writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf8');
-        cachedConfig = data;
+        console.log('[CONFIG] Successfully saved to disk.');
         return true;
     }
     catch (err) { console.error('Error saving config:', err); return false; }
@@ -237,11 +238,14 @@ async function updateDashboard() {
 
         const unixTime = Math.floor(Date.now() / 1000);
         const fields = [{ name: '⏱️ Last Update', value: `<t:${unixTime}:R>`, inline: false }];
-        products.forEach(p => fields.push({
-            name: `🛒 ${p.name.toUpperCase()}`,
-            value: `>>> 📦 **Stock:** \`${p.stock}\`\n💰 **Price:** \`${p.price}\`\n📋 **Format:** \`${p.format}\`\n📝 **Info:** ${p.description}\n🆔 **ID:** ||${p.id}||`,
-            inline: false
-        }));
+        products.forEach(p => {
+            const isMaint = config.maintenance?.[p.id] || false;
+            fields.push({
+                name: `🛒 ${p.name.toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`,
+                value: `>>> 📦 **Stock:** \`${p.stock}\`\n💰 **Price:** \`${p.price}\`\n📋 **Format:** \`${p.format}\`\n📝 **Info:** ${p.description}\n🆔 **ID:** ||${p.id}||`,
+                inline: false
+            });
+        });
         embed.addFields(fields);
 
         const row = new ActionRowBuilder().addComponents(
