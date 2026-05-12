@@ -88,17 +88,16 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.1.0',
-    codename: 'Stable',
+    version: '2.2.0',
+    codename: 'Evolution',
     date: '2026-05-12',
     changelog: [
-        { type: 'NEW', desc: 'Automated Costumer role assignment on first purchase' },
-        { type: 'FIX', desc: 'Resolved all "This interaction failed" errors across buttons' },
+        { type: 'NEW', desc: 'Entry Zone: Auto-assign role to new members' },
+        { type: 'NEW', desc: 'Entry & Leave Zone: Real-time professional logging' },
+        { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
         { type: 'FIX', desc: 'Fixed showModal timeout crashes (Unknown Interaction)' },
-        { type: 'FIX', desc: 'Early interaction acknowledgment for all handlers' },
-        { type: 'SYSTEM', desc: 'Added GuildMembers intent for reliable role operations' },
-        { type: 'SYSTEM', desc: 'Real-time interaction logging for debugging' },
-        { type: 'SYSTEM', desc: 'Database monitor embeds auto-refresh on startup' },
+        { type: 'SYS', desc: 'Implemented Version Dashboard system' },
+        { type: 'SYS', desc: 'Optimized server-side interaction handling' },
     ]
 };
 
