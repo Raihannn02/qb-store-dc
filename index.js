@@ -406,15 +406,22 @@ async function updateHoneypotWarning() {
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
 
+    const config = loadConfig();
+    const bannedCount = config.honeypotBans || 0;
+
     const embed = new EmbedBuilder()
         .setTitle('⛔ Honeypot Protection Active')
         .setColor('#d63031')
         .setDescription(
             "“Don't send any message here,\n" +
             "Unless you want to get banned ⛔”\n\n" +
-            "**System Explanation (English):**\n" +
-            "This channel is used as a security countermeasure (Honeypot) to automatically detect and ban users or automated scripts spreading phishing links, malware, or hacked Discord accounts. \n\n" +
-            "By sending a message here, you are flagged as a malicious actor and will be **permanently banned** from this server immediately. Only authorized Administrators are permitted to use this channel."
+            "**System Explanation:**\n" +
+            "This channel is used as a security countermeasure (Honeypot) to automatically detect and ban users or automated scripts spreading phishing links, malware, or hacked Discord accounts.\n\n" +
+            "By sending a message here, you are flagged as a malicious actor and will be **permanently banned** from this server immediately."
+        )
+        .addFields(
+            { name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
+            { name: '🛡️ Total User Banned', value: `\`${bannedCount}\``, inline: true }
         )
         .setFooter({ text: 'System Security Enforcement' })
         .setTimestamp();
@@ -424,12 +431,14 @@ async function updateHoneypotWarning() {
         const existing = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Honeypot Protection'));
         if (existing) {
             await existing.edit({ embeds: [embed] });
+            console.log('[HONEYPOT] Warning embed edited.');
         } else {
-            // Delete all other messages in honeypot channel
+            // Delete all other messages in honeypot channel to keep it clean
             for (const [, msg] of messages) {
                 await msg.delete().catch(() => { });
             }
             await channel.send({ embeds: [embed] });
+            console.log('[HONEYPOT] New warning embed sent.');
         }
     } catch (err) {
         console.error(`[HONEYPOT] Failed to update warning: ${err.message}`);
@@ -449,6 +458,11 @@ client.on('messageCreate', async message => {
         const banReason = `Automatic Banned User Type in Channel https://discord.com/channels/${message.guildId}/${honeypotId}`;
 
         try {
+            // Increment ban counter
+            const config = loadConfig();
+            config.honeypotBans = (config.honeypotBans || 0) + 1;
+            saveConfig(config);
+
             // Log before ban
             if (logChannelId) {
                 const logChannel = await client.channels.fetch(logChannelId).catch(() => null);
@@ -472,7 +486,10 @@ client.on('messageCreate', async message => {
             // Ban user
             await message.member.ban({ reason: banReason });
             await message.delete().catch(() => { });
-            console.log(`[HONEYPOT] Banned ${message.author.tag} for typing in honeypot.`);
+            console.log(`[HONEYPOT] Banned ${message.author.tag}. Total bans: ${config.honeypotBans}`);
+
+            // Refresh warning embed to show new count and timestamp
+            updateHoneypotWarning();
         } catch (err) {
             console.error(`[HONEYPOT] Failed to ban user: ${err.message}`);
         }
