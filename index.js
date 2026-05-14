@@ -135,17 +135,20 @@ async function getOrCreateDashboardMessage(channel, configKey, searchTitles = []
     // 1. Try saved ID first
     if (messageId) {
         try {
-            const m = await channel.messages.fetch(messageId);
+            const m = await withRetry(() => channel.messages.fetch(messageId), 3, 3000);
             if (m && m.author.id === client.user.id) return m;
-        } catch {
-            config[configKey] = null;
-            saveConfig(config);
+        } catch (e) {
+            // Only clear config if it truly doesn't exist (404)
+            if (e.code === 10008 || e.status === 404) {
+                config[configKey] = null;
+                saveConfig(config);
+            }
         }
     }
 
     // 2. Deep Search (Limit 100)
     try {
-        const msgs = await channel.messages.fetch({ limit: 100 });
+        const msgs = await withRetry(() => channel.messages.fetch({ limit: 100 }), 3, 3000);
         const matches = msgs.filter(m => {
             if (m.author.id !== client.user.id) return false;
             if (criteriaFn) return criteriaFn(m);
@@ -160,7 +163,6 @@ async function getOrCreateDashboardMessage(channel, configKey, searchTitles = []
             const primary = matches.first();
             config[configKey] = primary.id;
             saveConfig(config);
-            console.log(`[SYNC] Re-linked ${configKey} to existing message: ${primary.id}`);
 
             // Cleanup duplicates
             for (const [id, msg] of matches) {
@@ -169,7 +171,8 @@ async function getOrCreateDashboardMessage(channel, configKey, searchTitles = []
             return primary;
         }
     } catch (e) {
-        console.error(`[SYNC] Search failed for ${configKey}:`, e.message);
+        console.error(`[SYNC] Search failed due to network/error for ${configKey}:`, e.message);
+        throw e; // Propagate to caller to prevent 'send'
     }
 
     return null;
@@ -1289,10 +1292,15 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'sel_p_del_pick') {
                 const pid = interaction.values[0];
                 await interaction.deferUpdate();
+
+                // 1. Cleanup related pending payments first to avoid FK error
+                await supabase.from('pending_payments').delete().eq('product_id', pid);
+
+                // 2. Delete the product
                 const { error } = await supabase.from('products').delete().eq('id', pid);
                 if (error) return interaction.editReply({ content: `❌ Failed to delete product: ${error.message}`, components: [] });
 
-                await interaction.editReply({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
+                await interaction.editReply({ content: `✅ Product \`${pid}\` has been permanently deleted (including related pending orders).`, components: [] });
 
                 // Small delay to ensure DB sync before dashboard update
                 setTimeout(() => updateDashboard(), 1500);
@@ -1975,38 +1983,44 @@ client.on('interactionCreate', async interaction => {
 // ─────────────────────────────────────────────────────────────
 
 client.once('clientReady', async () => {
-    console.log(`[READY] Bot is online as ${client.user.tag}`);
-    console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
-    client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
+    try {
+        console.log(`[READY] Bot is online as ${client.user.tag}`);
+        console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
+        client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
 
-    await checkSchemaSupport();
-    await registerCommands();
-    updateDashboard();
-    updateVersionDashboard();
-    updateAuctionDashboard();
-    updateStockDashboard();
-    checkAuctionDeadlines();
-    updateHoneypotWarning();
+        await checkSchemaSupport();
+        await registerCommands();
 
-    // Refresh database monitor embeds on startup
-    const { data: products } = await supabase.from('products').select('id');
-    if (products) {
-        console.log(`[READY] Refreshing ${products.length} product embeds...`);
-        for (const p of products) {
-            updateDatabaseEmbed(p.id).catch(e => console.error(`[READY] Failed to update ${p.id}:`, e.message));
-        }
-    }
-
-    const config = loadConfig();
-    const interval = Math.max(5000, config.updateInterval || 15000);
-    setInterval(() => {
-        updateDashboard();
-        updateVersionDashboard();
-        updateAuctionDashboard();
-        updateStockDashboard();
+        // Sequential updates with error handling
+        await updateDashboard().catch(e => console.error('[READY] Dashboard main failed:', e.message));
+        await updateVersionDashboard().catch(e => console.error('[READY] Version dash failed:', e.message));
+        await updateAuctionDashboard().catch(e => console.error('[READY] Auction dash failed:', e.message));
+        await updateStockDashboard().catch(e => console.error('[READY] Stock dash failed:', e.message));
         checkAuctionDeadlines();
-        updateHoneypotWarning();
-    }, interval);
+        await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
+
+        // Refresh database monitor embeds on startup
+        const { data: products } = await supabase.from('products').select('id');
+        if (products) {
+            console.log(`[READY] Refreshing ${products.length} product embeds...`);
+            for (const p of products) {
+                updateDatabaseEmbed(p.id).catch(e => console.error(`[READY] Failed to update ${p.id}:`, e.message));
+            }
+        }
+
+        const config = loadConfig();
+        const interval = Math.max(5000, config.updateInterval || 15000);
+        setInterval(() => {
+            updateDashboard();
+            updateVersionDashboard();
+            updateAuctionDashboard();
+            updateStockDashboard();
+            checkAuctionDeadlines();
+            updateHoneypotWarning();
+        }, interval);
+    } catch (e) {
+        console.error('[FATAL] Readiness failed:', e);
+    }
 });
 
 client.login(process.env.DISCORD_TOKEN);
