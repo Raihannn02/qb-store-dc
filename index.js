@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.1.0',
-    codename: 'Zero-Latency',
-    date: 'May 14, 2026',
+    version: '3.1.1',
+    codename: 'Precision Response',
+    date: 'May 15, 2026',
     changelog: [
-        { type: 'SYS', desc: 'Architecture: Instant-Acknowledge Engine implemented for 100% stable responses.' },
-        { type: 'FIX', desc: 'Interaction: Resolved "This interaction failed" by prioritizing API deferral.' },
-        { type: 'PERF', desc: 'System: Optimized background refresh loops and interval management.' }
+        { type: 'FIX', desc: 'Critical: Fixed deferUpdate regression that broke all button/menu replies.' },
+        { type: 'SYS', desc: 'Architecture: Unified global deferReply for all non-modal interactions.' },
+        { type: 'PERF', desc: 'System: Instant-Acknowledge ordering preserved (defer BEFORE logging).' }
     ]
 };
 
@@ -1029,13 +1029,10 @@ client.on('interactionCreate', async interaction => {
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
             (interaction.isStringSelectMenu() && selectModalOptions.includes(interaction.values[0]));
 
-        // Secure the 3-second window IMMEDIATELY
+        // Secure the 3-second window IMMEDIATELY — always use deferReply (ephemeral)
+        // deferUpdate would ONLY edit the original message and break new replies
         if (interaction.isRepliable() && !isModalTrigger && !interaction.isModalSubmit()) {
-            if (interaction.isButton() || interaction.isStringSelectMenu()) {
-                await safeDeferUpdate(interaction); // Fastest way for components
-            } else {
-                await safeDefer(interaction); // For commands
-            }
+            await safeDefer(interaction);
         }
 
         // ── 2. LOGGING & SECURITY (Priority #2 - Occurs after acknowledgement) ──
