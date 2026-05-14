@@ -310,25 +310,33 @@ async function updateDatabaseEmbed(productId) {
     );
 
     try {
-        await withRetry(async () => {
-            const messages = await channel.messages.fetch({ limit: 50 });
-            const matches = messages.filter(m =>
-                m.author.id === client.user.id &&
-                m.embeds[0]?.footer?.text?.includes(productId)
+        await withLock(`db_embed_${productId}`, async () => {
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`btn_db_add_${productId}`).setLabel('Add Stock').setEmoji('➕').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId(`btn_db_edit_pick_${productId}`).setLabel('Edit Stock').setEmoji('📝').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
             );
 
-            if (matches.length > 0) {
-                const botMsg = matches.first();
-                await botMsg.edit({ embeds: [embed], components: [row] });
+            // Use standardized search (dynamic key for each product)
+            const config = loadConfig();
+            if (!config.monitorMessages) config.monitorMessages = {};
 
-                // CLEANUP: Delete other duplicates for this product ID
-                for (const [id, msg] of matches) {
-                    if (id !== botMsg.id) await msg.delete().catch(() => { });
-                }
+            const msg = await getOrCreateDashboardMessage(channel, `monitor_${productId}`, [productId], (m) => {
+                const footer = m.embeds[0]?.footer?.text || '';
+                return footer.includes(productId);
+            });
+
+            if (msg) {
+                await msg.edit({ embeds: [embed], components: [row] });
             } else {
-                await channel.send({ embeds: [embed], components: [row] });
+                const nMsg = await channel.send({ embeds: [embed], components: [row] });
+                const cfg = loadConfig(); // Reload to avoid race
+                if (!cfg.monitorMessages) cfg.monitorMessages = {};
+                cfg.monitorMessages[productId] = nMsg.id;
+                cfg[`monitor_${productId}`] = nMsg.id; // Compatibility with getOrCreate helper
+                saveConfig(cfg);
             }
-        }, 3, 2000);
+        });
         console.log(`[DB EMBED] Embed updated for '${productId}'`);
     } catch (err) {
         console.error(`[DB EMBED] Embed update failed for '${productId}': ${err.message}`);
