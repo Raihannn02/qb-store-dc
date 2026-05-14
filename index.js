@@ -88,10 +88,14 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.5.0',
-    codename: 'Permanent Shield',
-    date: '2026-05-13',
+    version: '2.6.0',
+    codename: 'Auction Master',
+    date: '2026-05-14',
     changelog: [
+        { type: 'NEW', desc: 'Auction System: Real-time dashboard & anti-fake bid' },
+        { type: 'NEW', desc: 'Auction: Integrated with Pakasir payment gateway' },
+        { type: 'NEW', desc: 'Auction Admin: Management tools & manual end control' },
+        { type: 'FIX', desc: 'Stability: Refines interaction handling for complex system' },
         { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
         { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
         { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
@@ -274,6 +278,69 @@ async function updateDashboard() {
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') return;
         console.error('Dashboard Update Error:', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// updateAuctionDashboard
+// ─────────────────────────────────────────────────────────────
+
+async function updateAuctionDashboard() {
+    const config = loadConfig();
+    const auctionChannelId = process.env.AUCTION_CHANNEL_ID;
+    if (!auctionChannelId) { console.warn('[AUCTION] AUCTION_CHANNEL_ID not set.'); return; }
+
+    try {
+        const channel = await client.channels.fetch(auctionChannelId).catch(() => null);
+        if (!channel) return;
+
+        // Fetch active auction
+        const { data: auction, error } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+
+        const embed = new EmbedBuilder()
+            .setTitle('🔨  AUCTION SYSTEM DASHBOARD')
+            .setColor('#f1c40f')
+            .setTimestamp();
+
+        if (error || !auction) {
+            embed.setDescription('>>> There is no active auction at the moment. Please wait for an admin to start a new auction session.')
+                .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+        } else {
+            const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
+            embed.setDescription(`>>> **Product:** \`${auction.name}\`\n**Description:** ${auction.description || '-'}\n\n🏆 **Highest Bid:** \`${formatPrice(auction.current_bid)}\`\n👤 **Highest Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '`None`'}\n⏳ **Ends:** <t:${unixEnd}:R> (<t:${unixEnd}:F>)`)
+                .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+        }
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('btn_auction_register').setLabel('Register').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('btn_open_bid').setLabel('Open Bid').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('btn_auction_settings').setLabel('Settings').setStyle(ButtonStyle.Secondary)
+        );
+
+        if (config.auctionMessageId) {
+            try {
+                const msg = await channel.messages.fetch(config.auctionMessageId);
+                await msg.edit({ embeds: [embed], components: [row] });
+                return;
+            } catch {
+                config.auctionMessageId = null;
+                saveConfig(config);
+            }
+        }
+
+        const msgs = await channel.messages.fetch({ limit: 10 });
+        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('AUCTION SYSTEM DASHBOARD'));
+        if (botMsg) {
+            await botMsg.edit({ embeds: [embed], components: [row] });
+            config.auctionMessageId = botMsg.id;
+            saveConfig(config);
+        } else {
+            const nMsg = await channel.send({ embeds: [embed], components: [row] });
+            config.auctionMessageId = nMsg.id;
+            saveConfig(config);
+        }
+    } catch (e) {
+        console.error('Auction Dashboard Update Error:', e);
     }
 }
 
@@ -605,6 +672,51 @@ client.on('interactionCreate', async interaction => {
                 if (insertErr) return interaction.editReply({ content: `❌ Registration failed: ${insertErr.message}` });
 
                 return interaction.editReply({ content: '✅ Successfully registered! You can now buy products.' });
+            }
+
+            // ── btn_auction_register ──────────────────────────
+            if (interaction.customId === 'btn_auction_register') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (user) return interaction.editReply({ content: '⚠️ You are already registered!' });
+                const { error: insertErr } = await supabase.from('users').insert([{ id: interaction.user.id }]);
+                if (insertErr) return interaction.editReply({ content: `❌ Registration failed: ${insertErr.message}` });
+                return interaction.editReply({ content: '✅ Successfully registered for the auction system!' });
+            }
+
+            // ── btn_open_bid ──────────────────────────────────
+            if (interaction.customId === 'btn_open_bid') {
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (!user) return interaction.reply({ content: '❌ Please register first by clicking the **Register** button.', flags: [MessageFlags.Ephemeral] });
+
+                const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+                if (!auction) return interaction.reply({ content: '❌ There is no active auction.', flags: [MessageFlags.Ephemeral] });
+
+                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(`💰 Place Bid | ${auction.name}`);
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
+                ));
+                return interaction.showModal(modal);
+            }
+
+            // ── btn_auction_settings ──────────────────────────
+            if (interaction.customId === 'btn_auction_settings') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return interaction.reply({ content: '❌ Only admins can access settings.', flags: [MessageFlags.Ephemeral] });
+
+                const menu = new StringSelectMenuBuilder()
+                    .setCustomId('sel_auction_admin')
+                    .setPlaceholder('Auction Management...')
+                    .addOptions([
+                        { label: 'Add Auction Product', description: 'Create a new auction', value: 'opt_add_auction', emoji: '➕' },
+                        { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
+                    ]);
+
+                return interaction.reply({
+                    content: '🛠️ **Auction Admin Menu**',
+                    components: [new ActionRowBuilder().addComponents(menu)],
+                    flags: [MessageFlags.Ephemeral]
+                });
             }
 
             // ── btn_db_add_ ───────────────────────────────────
@@ -998,7 +1110,100 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // Unhandled select menu
+            // ── sel_auction_admin ────────────────────────────
+            if (interaction.customId === 'sel_auction_admin') {
+                const choice = interaction.values[0];
+
+                if (choice === 'opt_add_auction') {
+                    const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('🔨 Add Auction Product');
+                    modal.addComponents(
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Steam Account High Level').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Base Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
+                    );
+                    try { return await interaction.showModal(modal); }
+                    catch (e) { console.error('[MODAL] opt_add_auction showModal failed:', e.message); return; }
+                }
+
+                if (choice === 'opt_toggle_auction') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    const { data: auctions } = await supabase.from('auctions').select('*').in('status', ['pending', 'active']).order('created_at', { ascending: false });
+                    if (!auctions || auctions.length === 0) return interaction.editReply({ content: '❌ No pending or active auctions found.' });
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_toggle_pick').setPlaceholder('Select an auction to toggle status...');
+                    auctions.forEach(a => menu.addOptions({ label: `${a.name} (${a.status})`, description: `Base: ${a.base_price}`, value: a.id }));
+                    return interaction.editReply({ content: '⚙️ **Auction Manager**\nSelect an auction to toggle its status:', components: [new ActionRowBuilder().addComponents(menu)] });
+                }
+                return;
+            }
+
+            // ── sel_auction_toggle_pick ──────────────────────
+            if (interaction.customId === 'sel_auction_toggle_pick') {
+                await interaction.deferUpdate();
+                const aid = interaction.values[0];
+                const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
+                if (!auction) return interaction.editReply({ content: '❌ Auction not found.', components: [] });
+
+                const newStatus = auction.status === 'active' ? 'ended' : 'active';
+                const { error } = await supabase.from('auctions').update({ status: newStatus }).eq('id', aid);
+                if (error) return interaction.editReply({ content: `❌ Failed to update status: ${error.message}`, components: [] });
+
+                if (newStatus === 'ended' && auction.highest_bidder_id) {
+                    const winnerId = auction.highest_bidder_id;
+                    const finalAmount = auction.current_bid;
+                    const orderId = `AUC${Date.now()}`;
+
+                    // Create Pakasir transaction
+                    try {
+                        const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
+                            project: process.env.PAKASIR_SLUG,
+                            order_id: orderId,
+                            amount: finalAmount,
+                            api_key: process.env.PAKASIR_API_KEY
+                        }, { timeout: 15000 }).catch(() => null);
+
+                        if (res?.data?.payment) {
+                            await supabase.from('pending_payments').insert([{
+                                invoice_id: orderId,
+                                user_id: winnerId,
+                                product_id: `AUCTION: ${auction.name}`,
+                                qty: 1,
+                                amount: finalAmount,
+                                created_at: new Date().toISOString()
+                            }]);
+
+                            const winner = await client.users.fetch(winnerId).catch(() => null);
+                            if (winner) {
+                                const embed = new EmbedBuilder()
+                                    .setTitle('🏆  Auction Won!')
+                                    .setColor('#f1c40f')
+                                    .setDescription(`Congratulations! You won the auction for **${auction.name}**.\n\nPlease complete the payment using the QRIS below to receive your item.`)
+                                    .addFields(
+                                        { name: 'Auction ID', value: `\`${auction.id}\``, inline: false },
+                                        { name: 'Product', value: auction.name, inline: true },
+                                        { name: 'Final Bid', value: formatPrice(finalAmount), inline: true },
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false }
+                                    )
+                                    .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
+                                    .setFooter({ text: 'QUANTUMBLOX AUCTION SYSTEM' }).setTimestamp();
+
+                                const btn = new ActionRowBuilder().addComponents(
+                                    new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
+                                );
+
+                                await winner.send({ embeds: [embed], components: [btn] }).catch(() => { });
+                            }
+                        }
+                    } catch (e) {
+                        console.error('[AUCTION] Payment creation failed:', e.message);
+                    }
+                }
+
+                await interaction.editReply({ content: `✅ Auction \`${auction.name}\` is now **${newStatus.toUpperCase()}**.`, components: [] });
+                updateAuctionDashboard();
+                return;
+            }
             console.warn(`[WARN] Unhandled select menu interaction: ${interaction.customId}`);
             if (!interaction.deferred && !interaction.replied) {
                 await interaction.reply({ content: '❌ Select menu handler not found.', flags: [MessageFlags.Ephemeral] });
@@ -1286,7 +1491,96 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            return; // end isModalSubmit()
+            // ── mod_auction_add ──────────────────────────────
+            if (interaction.customId === 'mod_auction_add') {
+                const name = interaction.fields.getTextInputValue('name');
+                const basePriceStr = interaction.fields.getTextInputValue('base_price');
+                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
+                const desc = interaction.fields.getTextInputValue('desc') || '-';
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
+                if (isNaN(basePrice) || isNaN(duration)) return interaction.editReply({ content: '❌ Invalid price or duration format.' });
+
+                const endTime = new Date(Date.now() + duration * 60000).toISOString();
+
+                const { error: insertErr } = await supabase.from('auctions').insert([{
+                    name,
+                    description: desc,
+                    base_price: basePrice,
+                    current_bid: basePrice,
+                    status: 'pending',
+                    end_time: endTime
+                }]);
+
+                if (insertErr) return interaction.editReply({ content: `❌ Failed to create auction: ${insertErr.message}` });
+
+                await interaction.editReply({ content: `✅ Auction product \`${name}\` created as PENDING. Start it via Settings.` });
+                updateAuctionDashboard();
+                return;
+            }
+
+            // ── mod_open_bid ──────────────────────────────────
+            if (interaction.customId === 'mod_open_bid') {
+                const bidStr = interaction.fields.getTextInputValue('amount');
+                const bidAmt = parseInt(bidStr.replace(/\D/g, ''));
+
+                if (isNaN(bidAmt)) {
+                    // Anti-fake bid logic: Automated Ban for non-numeric troll bids
+                    try {
+                        const banReason = `Automatic Banned: Troll/Fake Bid in Auction System (Non-numeric input: ${bidStr})`;
+                        await interaction.member.ban({ reason: banReason });
+                        await interaction.reply({ content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
+
+                        // Send log to restricted-users channel
+                        const config = loadConfig();
+                        const logChan = await client.channels.fetch('1503766353721430036').catch(() => null);
+                        if (logChan) {
+                            const embed = new EmbedBuilder()
+                                .setTitle('⛔ Banned User: Fake Bid')
+                                .setColor('#ff4757')
+                                .addFields(
+                                    { name: 'User', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+                                    { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
+                                    { name: 'Reason', value: 'Fake/Troll Bid (Invalid Input)', inline: false },
+                                    { name: 'Input', value: `\`${bidStr}\``, inline: true }
+                                )
+                                .setTimestamp();
+                            await logChan.send({ embeds: [embed] });
+                        }
+                    } catch (e) { console.error('[AUCTION] Failed to ban troll:', e.message); }
+                    return;
+                }
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+                if (!auction) return interaction.editReply({ content: '❌ No active auction found.' });
+
+                if (bidAmt <= auction.current_bid) {
+                    return interaction.editReply({ content: `❌ Your bid must be higher than the current bid: **${formatPrice(auction.current_bid)}**` });
+                }
+
+                // Update auction with new highest bid
+                const { error: updateErr } = await supabase.from('auctions').update({
+                    current_bid: bidAmt,
+                    highest_bidder_id: interaction.user.id
+                }).eq('id', auction.id);
+
+                if (updateErr) return interaction.editReply({ content: `❌ Failed to place bid: ${updateErr.message}` });
+
+                // Record in bid history
+                await supabase.from('auction_bids').insert([{
+                    auction_id: auction.id,
+                    user_id: interaction.user.id,
+                    amount: bidAmt
+                }]);
+
+                await interaction.editReply({ content: `✅ Your bid of **${formatPrice(bidAmt)}** has been placed!` });
+                updateAuctionDashboard();
+                return;
+            }
         }
 
     } catch (e) {
@@ -1315,6 +1609,7 @@ client.once('clientReady', async () => {
     await registerCommands();
     updateDashboard();
     updateVersionDashboard();
+    updateAuctionDashboard();
     updateHoneypotWarning();
 
     // Refresh database monitor embeds on startup
@@ -1327,9 +1622,13 @@ client.once('clientReady', async () => {
     }
 
     const config = loadConfig();
-    setInterval(updateDashboard, (config.updateInterval || 15000));
-    // Update version dashboard every 5 minutes (uptime refresh)
-    setInterval(updateVersionDashboard, 300000);
+    const interval = Math.max(5000, config.updateInterval || 15000);
+    setInterval(() => {
+        updateDashboard();
+        updateVersionDashboard();
+        updateAuctionDashboard();
+        updateHoneypotWarning();
+    }, interval);
 });
 
 client.login(process.env.DISCORD_TOKEN);
