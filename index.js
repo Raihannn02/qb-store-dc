@@ -93,14 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.6',
-    codename: 'Infinite Response',
+    version: '3.0.7',
+    codename: 'Zero Conflict',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'SYS', desc: 'Stability: Zero-Latency Interaction Engine implemented.' },
-        { type: 'SYS', desc: 'Stability: Global safety wrappers for all Discord API calls.' },
-        { type: 'FIX', desc: 'Interaction: Resolved "Unknown interaction" (10062) across all buttons.' },
-        { type: 'SYS', desc: 'Settlement: 1-hour auto-ban and reroll system active.' }
+        { type: 'FIX', desc: 'Interaction: Resolved "InteractionAlreadyReplied" across all modules.' },
+        { type: 'SYS', desc: 'Stability: Unified response engine with automatic state detection.' },
+        { type: 'FIX', desc: 'Interaction: Absolute immunity to 10062 and race conditions.' }
     ]
 };
 
@@ -1020,7 +1019,7 @@ client.on('interactionCreate', async interaction => {
 
         // ── SLASH COMMANDS (disabled) ─────────────────────────
         if (interaction.isChatInputCommand()) {
-            return interaction.reply({ content: 'Slash commands are disabled. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
+            return safeReply(interaction, { content: 'Slash commands are disabled. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
         }
 
         // ═════════════════════════════════════════════════════
@@ -1055,13 +1054,13 @@ client.on('interactionCreate', async interaction => {
                         };
                     }));
 
-                return interaction.editReply({ components: [new ActionRowBuilder().addComponents(s)] });
+                return safeReply(interaction, { components: [new ActionRowBuilder().addComponents(s)] });
             }
 
             // ── btn_admin_settings ────────────────────────────
             if (interaction.customId === 'btn_admin_settings') {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return interaction.reply({ content: '❌ Only admins can access settings.', flags: [MessageFlags.Ephemeral] });
+                    return safeReply(interaction, { content: '❌ Only admins can access settings.', flags: [MessageFlags.Ephemeral] });
 
                 const menu = new StringSelectMenuBuilder()
                     .setCustomId('sel_admin_menu')
@@ -1075,7 +1074,7 @@ client.on('interactionCreate', async interaction => {
                         { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' }
                     ]);
 
-                return interaction.reply({
+                return safeReply(interaction, {
                     content: '🛠️ **Admin Settings Menu**\nChoose what you would like to manage below:',
                     components: [new ActionRowBuilder().addComponents(menu)],
                     flags: [MessageFlags.Ephemeral]
@@ -1159,88 +1158,88 @@ client.on('interactionCreate', async interaction => {
             // ── btn_db_edit_pick_ ─────────────────────────────
             if (interaction.customId.startsWith('btn_db_edit_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
 
                 const pid = interaction.customId.replace('btn_db_edit_pick_', '');
                 // Already deferred at top
 
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to edit.' });
+                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to edit.' });
 
                 const select = new StringSelectMenuBuilder()
                     .setCustomId(`sel_db_edit_${pid}`)
                     .setPlaceholder('Select an entry to edit...');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
 
-                return interaction.editReply({ content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
+                return safeReply(interaction, { content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
             }
 
             // ── btn_db_del_pick_ ──────────────────────────────
             if (interaction.customId.startsWith('btn_db_del_pick_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
 
                 const pid = interaction.customId.replace('btn_db_del_pick_', '');
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                // Already deferred at top
 
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to delete.' });
+                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete.' });
 
                 const select = new StringSelectMenuBuilder()
                     .setCustomId(`sel_db_del_${pid}`)
                     .setPlaceholder('Select an entry to delete...');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
 
-                return interaction.editReply({ content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
+                return safeReply(interaction, { content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
             }
 
             // ── btn_stock_mgmt_add ───────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_add') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                // Already deferred at top
                 const { data: all } = await supabase.from('products').select('*').order('name');
                 const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return interaction.editReply({ content: '❌ No categories found. Please add a category first.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found. Please add a category first.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_add_pick').setPlaceholder('Select a category to add stock to...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return interaction.editReply({ content: '📦 **Add Stock**\nSelect the target category:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '📦 **Add Stock**\nSelect the target category:', components: [new ActionRowBuilder().addComponents(menu)] });
             }
 
             // ── btn_stock_mgmt_edit ──────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_edit') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                // Already deferred at top
                 const { data: all } = await supabase.from('products').select('*').order('name');
                 const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_edit_pick').setPlaceholder('Select a category to edit its stock...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return interaction.editReply({ content: '✏️ **Edit Stock**\nSelect the category whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '✏️ **Edit Stock**\nSelect the category whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
             }
 
             // ── btn_stock_mgmt_del ───────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_del') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                // Already deferred at top
                 const { data: all } = await supabase.from('products').select('*').order('name');
                 const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_del_pick').setPlaceholder('Select a category to delete its stock item...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return interaction.editReply({ content: '🗑️ **Delete Stock**\nSelect the category whose stock item you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '🗑️ **Delete Stock**\nSelect the category whose stock item you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
             }
 
             // ── btn_check_pay_ ────────────────────────────────
             if (interaction.customId.startsWith('btn_check_pay_')) {
-                try { await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); } catch (e) { if (e.code === 10062) return; }
+                // Already deferred at top
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
 
                 const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
                 if (fetchPayError || !pay)
-                    return interaction.editReply({ content: '❌ Invalid or expired transaction.' });
+                    return safeReply(interaction, { content: '❌ Invalid or expired transaction.' });
 
                 try {
                     const res = await axios.get(`https://app.pakasir.com/api/transactiondetail`, {
@@ -1256,7 +1255,7 @@ client.on('interactionCreate', async interaction => {
                     if (res.data.transaction?.status === 'completed') {
                         const { data: pidStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
                         if (!pidStock || pidStock.length < pay.qty)
-                            return interaction.editReply({ content: '⚠️ Payment confirmed but stock was depleted. Please contact an admin.' });
+                            return safeReply(interaction, { content: '⚠️ Payment confirmed but stock was depleted. Please contact an admin.' });
 
                         const deliver = pidStock.map(s => s.content);
                         const stockIds = pidStock.map(s => s.id);
@@ -1305,7 +1304,7 @@ client.on('interactionCreate', async interaction => {
                             )
                             .setFooter({ text: `QUANTUMBLOX ${isAuction ? 'AUCTION' : 'STORE'} • Elite Fulfillment` })
                             .setTimestamp();
-                        await interaction.editReply({ embeds: [confirmEmbed] });
+                        await safeReply(interaction, { embeds: [confirmEmbed] });
 
                         // 3. Specialized Logging
                         if (isAuction) {
@@ -1380,12 +1379,12 @@ client.on('interactionCreate', async interaction => {
 
                         return;
                     } else {
-                        return interaction.editReply({ content: '⏳ Payment not confirmed yet. Please complete the payment and try again.' });
+                        return safeReply(interaction, { content: '⏳ Payment not confirmed yet. Please complete the payment and try again.' });
                     }
                 } catch (e) {
                     const errMsg = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
                     console.error('Payment Check Error:', errMsg);
-                    return interaction.editReply({ content: `❌ Error checking payment: ${e.message}` });
+                    return safeReply(interaction, { content: `❌ Error checking payment: ${e.message}` });
                 }
                 return;
             }
@@ -1393,7 +1392,7 @@ client.on('interactionCreate', async interaction => {
             // Unhandled button
             console.warn(`[WARN] Unhandled button interaction: ${interaction.customId}`);
             if (!interaction.deferred && !interaction.replied) {
-                await interaction.reply({ content: '❌ Button handler not found.', flags: [MessageFlags.Ephemeral] });
+                await safeReply(interaction, { content: '❌ Button handler not found.', flags: [MessageFlags.Ephemeral] });
             }
             return; // end isButton()
         }
@@ -1935,7 +1934,7 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
 
-                await interaction.editReply({ content: `✅ Order \`${inv}\` fulfilled manually!` });
+                await safeReply(interaction, { content: `✅ Order \`${inv}\` fulfilled manually!` });
                 updateDashboard();
                 updateDatabaseEmbed(pay.product_id);
                 return;
@@ -1943,14 +1942,14 @@ client.on('interactionCreate', async interaction => {
 
             // ── mod_db_add_ ───────────────────────────────────
             if (interaction.customId.startsWith('mod_db_add_')) {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
                 const pid = interaction.customId.replace('mod_db_add_', '');
                 const lines = interaction.fields.getTextInputValue('data').split('\n').map(l => l.trim()).filter(Boolean);
 
-                if (lines.length === 0) return interaction.editReply({ content: '❌ No valid stock data entered.' });
+                if (lines.length === 0) return safeReply(interaction, { content: '❌ No valid stock data entered.' });
 
                 const { error: insertErr } = await supabase.from('stock').insert(lines.map(line => ({ product_id: pid, content: line })));
-                if (insertErr) return interaction.editReply({ content: `❌ Failed to add stock: ${insertErr.message}` });
+                if (insertErr) return safeReply(interaction, { content: `❌ Failed to add stock: ${insertErr.message}` });
 
                 const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
                 await supabase.from('products').update({ stock: count.length }).eq('id', pid);
@@ -1963,7 +1962,7 @@ client.on('interactionCreate', async interaction => {
 
             // ── mod_db_edit_ ──────────────────────────────────
             if (interaction.customId.startsWith('mod_db_edit_')) {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
                 // customId format: mod_db_edit_{pid}_{sid}
                 const without = interaction.customId.replace('mod_db_edit_', '');
                 const lastUnd = without.lastIndexOf('_');
@@ -1972,9 +1971,9 @@ client.on('interactionCreate', async interaction => {
                 const newContent = interaction.fields.getTextInputValue('data').trim();
 
                 const { error: updateErr } = await supabase.from('stock').update({ content: newContent }).eq('id', sid);
-                if (updateErr) return interaction.editReply({ content: `❌ Failed to update: ${updateErr.message}` });
+                if (updateErr) return safeReply(interaction, { content: `❌ Failed to update: ${updateErr.message}` });
 
-                await interaction.editReply({ content: '✅ Stock entry updated.' });
+                await safeReply(interaction, { content: '✅ Stock entry updated.' });
                 updateDatabaseEmbed(pid);
                 return;
             }
@@ -1986,16 +1985,16 @@ client.on('interactionCreate', async interaction => {
                 const qty = parseInt(qtyText);
 
                 if (isNaN(qty) || qty <= 0)
-                    return interaction.reply({ content: '❌ Invalid quantity. Please enter a positive number.', flags: [MessageFlags.Ephemeral] });
+                    return safeReply(interaction, { content: '❌ Invalid quantity. Please enter a positive number.', flags: [MessageFlags.Ephemeral] });
 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 // Fetch product
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p)
-                    return interaction.editReply({ content: '❌ Product not found.' });
+                    return safeReply(interaction, { content: '❌ Product not found.' });
                 if (p.stock < qty)
-                    return interaction.editReply({ content: `❌ Not enough stock. Available: ${p.stock}` });
+                    return safeReply(interaction, { content: `❌ Not enough stock. Available: ${p.stock}` });
 
                 const orderId = `INV${Date.now()}`;
                 const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
@@ -2008,7 +2007,7 @@ client.on('interactionCreate', async interaction => {
                 }, { timeout: 15000 }).catch(() => null);
 
                 if (!res?.data?.payment)
-                    return interaction.editReply({ content: '❌ Failed to create payment. Please try again later.' });
+                    return safeReply(interaction, { content: '❌ Failed to create payment. Please try again later.' });
 
                 await supabase.from('pending_payments').insert([{
                     invoice_id: orderId,
@@ -2019,7 +2018,7 @@ client.on('interactionCreate', async interaction => {
                     created_at: new Date().toISOString()
                 }]);
 
-                await interaction.editReply({
+                await safeReply(interaction, {
                     embeds: [new EmbedBuilder()
                         .setTitle('💳  Payment Invoice').setColor('#0099ff')
                         .setDescription('Scan the QR code below using a QRIS-compatible app, then click **Check Payment** to verify your transfer.')
@@ -2049,7 +2048,7 @@ client.on('interactionCreate', async interaction => {
                 const category = interaction.fields.getTextInputValue('category');
                 const desc = interaction.fields.getTextInputValue('desc');
 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 const { error: insErr } = await supabase.from('products').insert([{
                     id: manualPid,
@@ -2059,8 +2058,8 @@ client.on('interactionCreate', async interaction => {
                     system_type: 'auction'
                 }]);
 
-                if (insErr) return interaction.editReply({ content: `❌ Failed to create product: ${insErr.message}` });
-                await interaction.editReply({ content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
+                if (insErr) return safeReply(interaction, { content: `❌ Failed to create product: ${insErr.message}` });
+                await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
                 updateStockDashboard();
                 return;
             }
@@ -2072,7 +2071,7 @@ client.on('interactionCreate', async interaction => {
                 const category = interaction.fields.getTextInputValue('category');
                 const desc = interaction.fields.getTextInputValue('desc');
 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 const { error: updErr } = await supabase.from('products').update({
                     name,
@@ -2080,9 +2079,9 @@ client.on('interactionCreate', async interaction => {
                     description: desc
                 }).eq('id', pid);
 
-                if (updErr) return interaction.editReply({ content: `❌ Failed to update product: ${updErr.message}` });
+                if (updErr) return safeReply(interaction, { content: `❌ Failed to update product: ${updErr.message}` });
 
-                await interaction.editReply({ content: `✅ Product **${name}** (ID: \`${pid}\`) updated successfully!` });
+                await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${pid}\`) updated successfully!` });
                 updateDashboard();
                 updateStockDashboard();
                 return;
@@ -2095,15 +2094,15 @@ client.on('interactionCreate', async interaction => {
                 const incStr = interaction.fields.getTextInputValue('increment');
                 const duration = parseInt(interaction.fields.getTextInputValue('duration'));
 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 // Fetch product details from database
                 const { data: p, error: pErr } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (pErr || !p) return interaction.editReply({ content: `❌ Product ID \`${pid}\` not found in database. Please create it first via 'Add Product'.` });
+                if (pErr || !p) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found in database. Please create it first via 'Add Product'.` });
 
                 const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
                 const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
-                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return interaction.editReply({ content: '❌ Invalid price, increment, or duration format.' });
+                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return safeReply(interaction, { content: '❌ Invalid price, increment, or duration format.' });
 
                 const endTime = new Date(Date.now() + duration * 60000).toISOString();
 
@@ -2119,9 +2118,9 @@ client.on('interactionCreate', async interaction => {
                     end_time: endTime
                 }]);
 
-                if (insertErr) return interaction.editReply({ content: `❌ Failed to create auction: ${insertErr.message}` });
+                if (insertErr) return safeReply(interaction, { content: `❌ Failed to create auction: ${insertErr.message}` });
 
-                await interaction.editReply({ content: `✅ Auction for \`${p.name}\` created as PENDING. Start it via Settings.` });
+                await safeReply(interaction, { content: `✅ Auction for \`${p.name}\` created as PENDING. Start it via Settings.` });
                 updateAuctionDashboard();
                 return;
             }
@@ -2136,7 +2135,7 @@ client.on('interactionCreate', async interaction => {
                     try {
                         const banReason = `Automatic Banned: Troll/Fake Bid in Auction System (Non-numeric input: ${bidStr})`;
                         await interaction.member.ban({ reason: banReason });
-                        await interaction.reply({ content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
+                        await safeReply(interaction, { content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
 
                         // Send log to restricted-users channel
                         const logChan = await client.channels.fetch('1503766353721430036').catch(() => null);
@@ -2157,24 +2156,24 @@ client.on('interactionCreate', async interaction => {
                     return;
                 }
 
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 // Check registration here to ensure token stability at start
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (!user) return interaction.editReply({ content: '❌ You are not registered for the auction. Please click **Register** on the dashboard first.' });
+                if (!user) return safeReply(interaction, { content: '❌ You are not registered for the auction. Please click **Register** on the dashboard first.' });
 
                 const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
-                if (!auction) return interaction.editReply({ content: '❌ No active auction found.' });
+                if (!auction) return safeReply(interaction, { content: '❌ No active auction found.' });
 
                 const minNextBid = auction.current_bid + (auction.bid_increment || 5000);
                 if (bidAmt < minNextBid) {
-                    return interaction.editReply({ content: `❌ Your bid must be at least **${formatPrice(minNextBid)}** (Min. Increment: ${formatPrice(auction.bid_increment)})` });
+                    return safeReply(interaction, { content: `❌ Your bid must be at least **${formatPrice(minNextBid)}** (Min. Increment: ${formatPrice(auction.bid_increment)})` });
                 }
 
                 // Check if bid is a valid increment multiple
                 const diff = bidAmt - auction.base_price;
                 if (diff % (auction.bid_increment || 5000) !== 0) {
-                    return interaction.editReply({ content: `❌ Bid must be a multiple of the increment: **${formatPrice(auction.bid_increment)}** starting from **${formatPrice(auction.base_price)}**.` });
+                    return safeReply(interaction, { content: `❌ Bid must be a multiple of the increment: **${formatPrice(auction.bid_increment)}** starting from **${formatPrice(auction.base_price)}**.` });
                 }
 
                 // Update auction with new highest bid
@@ -2183,7 +2182,7 @@ client.on('interactionCreate', async interaction => {
                     highest_bidder_id: interaction.user.id
                 }).eq('id', auction.id);
 
-                if (updateErr) return interaction.editReply({ content: `❌ Failed to place bid: ${updateErr.message}` });
+                if (updateErr) return safeReply(interaction, { content: `❌ Failed to place bid: ${updateErr.message}` });
 
                 // Record in bid history
                 await supabase.from('auction_bids').insert([{
@@ -2192,32 +2191,32 @@ client.on('interactionCreate', async interaction => {
                     amount: bidAmt
                 }]);
 
-                await interaction.editReply({ content: `✅ Your bid of **${formatPrice(bidAmt)}** has been placed!` });
+                await safeReply(interaction, { content: `✅ Your bid of **${formatPrice(bidAmt)}** has been placed!` });
                 updateAuctionDashboard();
                 return;
             }
             // ── mod_auction_add_stock ────────────────────────
             if (interaction.customId === 'mod_auction_add_stock') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await safeDefer(interaction);
 
                 const pid = interaction.fields.getTextInputValue('pid');
                 const content = interaction.fields.getTextInputValue('content');
 
                 const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                if (lines.length === 0) return interaction.editReply({ content: '❌ No valid content provided.' });
+                if (lines.length === 0) return safeReply(interaction, { content: '❌ No valid content provided.' });
 
                 const { data: prod } = await supabase.from('products').select('id, name').eq('id', pid).single();
-                if (!prod) return interaction.editReply({ content: `❌ Product ID \`${pid}\` not found.` });
+                if (!prod) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found.` });
 
                 const inserts = lines.map(line => ({ product_id: pid, content: line }));
                 const { error: stockErr } = await supabase.from('stock').insert(inserts);
 
-                if (stockErr) return interaction.editReply({ content: `❌ Failed to add stock: ${stockErr.message}` });
+                if (stockErr) return safeReply(interaction, { content: `❌ Failed to add stock: ${stockErr.message}` });
 
                 const { count } = await supabase.from('stock').select('id', { count: 'exact', head: true }).eq('product_id', pid);
                 await supabase.from('products').update({ stock: count }).eq('id', pid);
 
-                await interaction.editReply({ content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
+                await safeReply(interaction, { content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
 
                 // Fire and forget updates to keep response fast
                 updateDashboard().catch(() => { });
@@ -2231,13 +2230,7 @@ client.on('interactionCreate', async interaction => {
     } catch (e) {
         if (e.code === 10062) return; // Interaction expired/handled, skip reporting
         console.error('Interaction Error:', e);
-        try {
-            if (interaction.deferred || interaction.replied) {
-                await interaction.editReply({ content: '❌ An unexpected error occurred. Please try again.' });
-            } else {
-                await interaction.reply({ content: '❌ An unexpected error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
-            }
-        } catch (_) { /* ignore errors during error reporting */ }
+        await safeReply(interaction, { content: '❌ An unexpected error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
     }
 });
 
