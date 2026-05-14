@@ -116,6 +116,57 @@ const BOT_VERSION = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// DASHBOARD SYNC & LOCKS
+// ─────────────────────────────────────────────────────────────
+
+const UPDATE_LOCKS = new Map();
+
+async function withLock(key, fn) {
+    if (UPDATE_LOCKS.get(key)) return;
+    UPDATE_LOCKS.set(key, true);
+    try { return await fn(); }
+    finally { UPDATE_LOCKS.set(key, false); }
+}
+
+async function getOrCreateDashboardMessage(channel, configKey, searchTitles = [], criteriaFn = null) {
+    const config = loadConfig();
+    const messageId = config[configKey];
+
+    // 1. Try saved ID
+    if (messageId) {
+        try {
+            return await channel.messages.fetch(messageId);
+        } catch {
+            config[configKey] = null;
+            saveConfig(config);
+        }
+    }
+
+    // 2. Search aggressively (100 messages)
+    const msgs = await channel.messages.fetch({ limit: 100 });
+    const matches = msgs.filter(m => {
+        if (m.author.id !== client.user.id) return false;
+        if (criteriaFn) return criteriaFn(m);
+        const title = m.embeds[0]?.title?.toUpperCase() || '';
+        return searchTitles.some(t => title.includes(t.toUpperCase()));
+    });
+
+    if (matches.size > 0) {
+        const primary = matches.first();
+        config[configKey] = primary.id;
+        saveConfig(config);
+
+        // CLEANUP: Delete all duplicates
+        for (const [id, msg] of matches) {
+            if (id !== primary.id) await msg.delete().catch(() => { });
+        }
+        return primary;
+    }
+
+    return null;
+}
+
+// ─────────────────────────────────────────────────────────────
 // SCHEMA RESILIENCY
 // ─────────────────────────────────────────────────────────────
 
@@ -274,14 +325,13 @@ async function registerCommands() {
 // ─────────────────────────────────────────────────────────────
 
 async function updateDashboard() {
-    const config = loadConfig();
-    const { data: allProducts, error } = await supabase.from('products').select('*').order('name');
-    if (error || !config || !allProducts) return;
+    await withLock('dashboard', async () => {
+        const config = loadConfig();
+        const { data: allProducts, error } = await supabase.from('products').select('*').order('name');
+        if (error || !config || !allProducts) return;
 
-    const products = allProducts.filter(p => !isAuctionProduct(p));
-
-    try {
-        const channel = await client.channels.fetch(config.channelId);
+        const products = allProducts.filter(p => !isAuctionProduct(p));
+        const channel = await client.channels.fetch(config.channelId).catch(() => null);
         if (!channel) return;
 
         const embed = new EmbedBuilder()
@@ -291,7 +341,6 @@ async function updateDashboard() {
             .setTimestamp();
 
         if (config.embed?.thumbnail) embed.setThumbnail(config.embed.thumbnail);
-
         const unixTime = Math.floor(Date.now() / 1000);
         const fields = [{ name: '⏱️ Last Update', value: `<t:${unixTime}:R>`, inline: false }];
         products.forEach(p => {
@@ -310,46 +359,15 @@ async function updateDashboard() {
             new ButtonBuilder().setCustomId('btn_admin_settings').setLabel('Setting').setStyle(ButtonStyle.Secondary)
         );
 
-        if (config.dashboardMessageId) {
-            try {
-                const msg = await channel.messages.fetch(config.dashboardMessageId);
-                await msg.edit({ embeds: [embed], components: [row] });
-                return;
-            } catch {
-                config.dashboardMessageId = null;
-                saveConfig(config);
-            }
-        }
-
-        const msgs = await channel.messages.fetch({ limit: 50 });
-        const targetTitle = (config.embed?.title || 'Shop Dashboard').toUpperCase();
-        const matches = msgs.filter(m =>
-            m.author.id === client.user.id &&
-            m.embeds[0]?.title?.toUpperCase().includes(targetTitle)
-        );
-
-        if (matches.length > 0) {
-            const botMsg = matches.first();
-            await botMsg.edit({ embeds: [embed], components: [row] });
-            config.dashboardMessageId = botMsg.id;
-            saveConfig(config);
-
-            // AUTO-CLEANUP: Delete all other duplicates
-            for (const [id, msg] of matches) {
-                if (id !== botMsg.id) {
-                    await msg.delete().catch(() => { });
-                    console.log(`[CLEANUP] Deleted duplicate dashboard: ${id}`);
-                }
-            }
-        } else {
+        const targetTitle = config.embed?.title || 'Shop Dashboard';
+        const msg = await getOrCreateDashboardMessage(channel, 'dashboardMessageId', [targetTitle]);
+        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.dashboardMessageId = nMsg.id;
             saveConfig(config);
         }
-    } catch (e) {
-        if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') return;
-        console.error('Dashboard Update Error:', e);
-    }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -357,23 +375,18 @@ async function updateDashboard() {
 // ─────────────────────────────────────────────────────────────
 
 async function updateAuctionDashboard() {
-    const config = loadConfig();
-    const auctionChannelId = process.env.AUCTION_CHANNEL_ID;
-    if (!auctionChannelId) { console.warn('[AUCTION] AUCTION_CHANNEL_ID not set.'); return; }
+    await withLock('auction', async () => {
+        const config = loadConfig();
+        const auctionChannelId = process.env.AUCTION_CHANNEL_ID;
+        if (!auctionChannelId) { console.warn('[AUCTION] AUCTION_CHANNEL_ID not set.'); return; }
 
-    try {
         const channel = await client.channels.fetch(auctionChannelId).catch(() => null);
         if (!channel) return;
 
-        // Fetch active auction
-        const { data: auction, error } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+        const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+        const embed = new EmbedBuilder().setTitle('⚖️  AUCTION SYSTEM DASHBOARD').setColor('#2b2d31').setTimestamp();
 
-        const embed = new EmbedBuilder()
-            .setTitle('⚖️  AUCTION SYSTEM DASHBOARD')
-            .setColor('#2b2d31')
-            .setTimestamp();
-
-        if (error || !auction) {
+        if (!auction) {
             embed.setDescription('>>> There is no active auction at the moment. Please wait for an admin to start a new auction session.')
                 .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
@@ -388,8 +401,7 @@ async function updateAuctionDashboard() {
                 `• Min. Increment: \`${formatPrice(auction.bid_increment)}\`\n` +
                 `• **Anti-Fake Bid:** Troll bids will be automatically BANNED.\n` +
                 `• **Payment:** Winner must pay within 24 hours or face permanent BAN.`
-            )
-                .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+            ).addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -398,41 +410,14 @@ async function updateAuctionDashboard() {
             new ButtonBuilder().setCustomId('btn_auction_settings').setLabel('Settings').setStyle(ButtonStyle.Secondary)
         );
 
-        if (config.auctionMessageId) {
-            try {
-                const msg = await channel.messages.fetch(config.auctionMessageId);
-                await msg.edit({ embeds: [embed], components: [row] });
-                return;
-            } catch {
-                config.auctionMessageId = null;
-                saveConfig(config);
-            }
-        }
-
-        const msgs = await channel.messages.fetch({ limit: 50 });
-        const matches = msgs.filter(m =>
-            m.author.id === client.user.id &&
-            m.embeds[0]?.title?.includes('AUCTION SYSTEM DASHBOARD')
-        );
-
-        if (matches.length > 0) {
-            const botMsg = matches.first();
-            await botMsg.edit({ embeds: [embed], components: [row] });
-            config.auctionMessageId = botMsg.id;
-            saveConfig(config);
-
-            // Cleanup
-            for (const [id, msg] of matches) {
-                if (id !== botMsg.id) await msg.delete().catch(() => { });
-            }
-        } else {
+        const msg = await getOrCreateDashboardMessage(channel, 'auctionMessageId', ['AUCTION SYSTEM DASHBOARD']);
+        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.auctionMessageId = nMsg.id;
             saveConfig(config);
         }
-    } catch (e) {
-        console.error('Auction Dashboard Update Error:', e);
-    }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -495,11 +480,11 @@ async function checkAuctionDeadlines() {
 // ─────────────────────────────────────────────────────────────
 
 async function updateStockDashboard() {
-    const config = loadConfig();
-    const stockChannelId = process.env.STOCK_MANAGEMENT_CHANNEL_ID;
-    if (!stockChannelId) { console.warn('[STOCK] STOCK_MANAGEMENT_CHANNEL_ID not set.'); return; }
+    await withLock('stock', async () => {
+        const config = loadConfig();
+        const stockChannelId = process.env.STOCK_MANAGEMENT_CHANNEL_ID;
+        if (!stockChannelId) { console.warn('[STOCK] STOCK_MANAGEMENT_CHANNEL_ID not set.'); return; }
 
-    try {
         const channel = await client.channels.fetch(stockChannelId).catch(() => null);
         if (!channel) return;
 
@@ -518,7 +503,6 @@ async function updateStockDashboard() {
             const list = products.map(p => `• **${p.name}**\n   ID: \`${p.id}\` | Stock: \`${p.stock}\``).join('\n\n');
             embed.setDescription(`>>> **Manage your product categories and stock levels below.**\n\n${list.slice(0, 3500)}`);
         }
-
         embed.addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
 
         const row = new ActionRowBuilder().addComponents(
@@ -527,41 +511,14 @@ async function updateStockDashboard() {
             new ButtonBuilder().setCustomId('btn_stock_mgmt_del').setLabel('Delete Stock').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
         );
 
-        if (config.stockMessageId) {
-            try {
-                const msg = await channel.messages.fetch(config.stockMessageId);
-                await msg.edit({ embeds: [embed], components: [row] });
-                return;
-            } catch {
-                config.stockMessageId = null;
-                saveConfig(config);
-            }
-        }
-
-        const msgs = await channel.messages.fetch({ limit: 50 });
-        const matches = msgs.filter(m =>
-            m.author.id === client.user.id &&
-            m.embeds[0]?.title?.includes('STOCK MANAGEMENT SYSTEM')
-        );
-
-        if (matches.length > 0) {
-            const botMsg = matches.first();
-            await botMsg.edit({ embeds: [embed], components: [row] });
-            config.stockMessageId = botMsg.id;
-            saveConfig(config);
-
-            // Cleanup
-            for (const [id, msg] of matches) {
-                if (id !== botMsg.id) await msg.delete().catch(() => { });
-            }
-        } else {
+        const msg = await getOrCreateDashboardMessage(channel, 'stockMessageId', ['STOCK MANAGEMENT SYSTEM']);
+        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.stockMessageId = nMsg.id;
             saveConfig(config);
         }
-    } catch (e) {
-        console.error('Stock Dashboard Update Error:', e);
-    }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -569,82 +526,49 @@ async function updateStockDashboard() {
 // ─────────────────────────────────────────────────────────────
 
 async function updateVersionDashboard() {
-    const channelId = process.env.VERSION_CHANNEL_ID;
-    if (!channelId) { console.warn('[VERSION] VERSION_CHANNEL_ID not set.'); return; }
+    await withLock('version', async () => {
+        const channelId = process.env.VERSION_CHANNEL_ID;
+        if (!channelId) return;
 
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) { console.error(`[VERSION] Channel '${channelId}' not accessible.`); return; }
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel) return;
 
-    const tagMap = { NEW: '`[NEW]`', FIX: '`[FIX]`', SYSTEM: '`[SYS]`' };
-    let changelogLines = BOT_VERSION.changelog.map(
-        c => `${tagMap[c.type] || '`[---]`'}  ${c.desc}`
-    ).join('\n');
+        const tagMap = { NEW: '`[NEW]`', FIX: '`[FIX]`', SYSTEM: '`[SYS]`' };
+        let changelogLines = BOT_VERSION.changelog.map(c => `${tagMap[c.type] || '`[---]`'}  ${c.desc}`).join('\n');
+        if (changelogLines.length > 1024) changelogLines = changelogLines.slice(0, 1021) + '...';
 
-    if (changelogLines.length > 1024) {
-        changelogLines = changelogLines.slice(0, 1021) + '...';
-    }
+        const uptime = process.uptime();
+        const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`;
 
-    const uptime = process.uptime();
-    const hrs = Math.floor(uptime / 3600);
-    const mins = Math.floor((uptime % 3600) / 60);
-    const secs = Math.floor(uptime % 60);
-    const uptimeStr = `${hrs}h ${mins}m ${secs}s`;
+        const embed = new EmbedBuilder()
+            .setTitle('QUANTUMBLOX STORE — Version Dashboard')
+            .setColor('#2b2d31')
+            .setDescription(`**v${BOT_VERSION.version}** — ${BOT_VERSION.codename}\nReleased: ${BOT_VERSION.date}`)
+            .addFields(
+                { name: 'Changelog', value: changelogLines || 'No changes recorded.', inline: false },
+                { name: 'Bot', value: `\`${client.user.tag}\``, inline: true },
+                { name: 'Status', value: '\`Online\`', inline: true },
+                { name: 'Uptime', value: `\`${uptimeStr}\``, inline: true },
+                { name: 'Node.js', value: `\`${process.version}\``, inline: true },
+                { name: 'Platform', value: `\`${process.platform}\``, inline: true },
+                { name: 'Memory', value: `\`${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\``, inline: true }
+            )
+            .setFooter({ text: `QUANTUMBLOX STORE v${BOT_VERSION.version}` })
+            .setTimestamp();
 
-    const embed = new EmbedBuilder()
-        .setTitle('QUANTUMBLOX STORE — Version Dashboard')
-        .setColor('#2b2d31')
-        .setDescription(
-            `**v${BOT_VERSION.version}** — ${BOT_VERSION.codename}\n` +
-            `Released: ${BOT_VERSION.date}`
-        )
-        .addFields(
-            { name: 'Changelog', value: changelogLines || 'No changes recorded.', inline: false },
-            { name: 'Bot', value: `\`${client.user.tag}\``, inline: true },
-            { name: 'Status', value: '\`Online\`', inline: true },
-            { name: 'Uptime', value: `\`${uptimeStr}\``, inline: true },
-            { name: 'Node.js', value: `\`${process.version}\``, inline: true },
-            { name: 'Platform', value: `\`${process.platform}\``, inline: true },
-            { name: 'Memory', value: `\`${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\``, inline: true }
-        )
-        .setFooter({ text: `QUANTUMBLOX STORE v${BOT_VERSION.version}` })
-        .setTimestamp();
+        const config = loadConfig();
+        if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
 
-    const config = loadConfig();
-    if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
-
-    try {
-        // Find existing version dashboard message and edit it
-        const messages = await channel.messages.fetch({ limit: 50 });
-        const matches = messages.filter(m =>
-            m.author.id === client.user.id &&
-            m.embeds[0]?.title?.includes('Version Dashboard')
-        );
-
-        if (matches.length > 0) {
-            const botMsg = matches.first();
-            await botMsg.edit({ embeds: [embed] });
-            console.log('[VERSION] Dashboard updated (edited existing).');
-
-            // Cleanup others
-            for (const [id, msg] of matches) {
-                if (id !== botMsg.id) await msg.delete().catch(() => { });
-            }
-        } else {
-            // Delete old "Bot Online" embeds if any from larger fetch
-            const oldEmbeds = messages.filter(m =>
-                m.author.id === client.user.id &&
-                (m.embeds[0]?.title?.includes('Bot Online'))
-            );
-            for (const [, msg] of oldEmbeds) {
-                await msg.delete().catch(() => { });
-            }
-
-            await channel.send({ embeds: [embed] });
-            console.log('[VERSION] Dashboard created (new message).');
+        const msg = await getOrCreateDashboardMessage(channel, 'versionMessageId', ['Version Dashboard']);
+        if (msg) await msg.edit({ embeds: [embed] });
+        else {
+            const oldEmbeds = (await channel.messages.fetch({ limit: 50 })).filter(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Bot Online'));
+            for (const [, m] of oldEmbeds) await m.delete().catch(() => { });
+            const nMsg = await channel.send({ embeds: [embed] });
+            config.versionMessageId = nMsg.id;
+            saveConfig(config);
         }
-    } catch (err) {
-        console.error(`[VERSION] Failed to update dashboard: ${err.message}`);
-    }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
