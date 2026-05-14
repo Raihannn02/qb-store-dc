@@ -1228,8 +1228,7 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Optional)').setPlaceholder('e.g. 1499...').setStyle(TextInputStyle.Short).setRequired(false)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Optional)').setPlaceholder('e.g. 1499...').setStyle(TextInputStyle.Short).setRequired(false))
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) { console.error('[MODAL] opt_add_auction showModal failed:', e.message); return; }
@@ -1618,7 +1617,7 @@ client.on('interactionCreate', async interaction => {
                 const incStr = interaction.fields.getTextInputValue('increment');
                 const duration = parseInt(interaction.fields.getTextInputValue('duration'));
                 const linkedPid = interaction.fields.getTextInputValue('pid') || null;
-                const desc = interaction.fields.getTextInputValue('desc') || '-';
+                const desc = '-'; // Removed from modal to stay within 5-field limit
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
