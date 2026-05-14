@@ -93,10 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.6',
+    version: '2.9.7',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Auction System: Refactored to Product-Centric model.' },
+        { type: 'NEW', desc: 'Auction System: Renamed Category Management to Product Management.' },
+        { type: 'NEW', desc: 'UI: Streamlined Add Auction modal with automatic info retrieval.' },
         { type: 'NEW', desc: 'Auction System: Professional UI redesign for Dashboard.' },
         { type: 'NEW', desc: 'Auction System: Added Category and Description fields.' },
         { type: 'FIX', desc: 'Stability: Optimized interaction handling to prevent Unknown Interaction errors.' },
@@ -912,10 +915,10 @@ client.on('interactionCreate', async interaction => {
                         .setCustomId('sel_auction_admin')
                         .setPlaceholder('Auction Management...')
                         .addOptions([
-                            { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
-                            { label: 'Add Category', description: 'Create a new product category', value: 'opt_add_category', emoji: '🏷️' },
-                            { label: 'Edit Category', description: 'Modify an existing category', value: 'opt_edit_category', emoji: '✏️' },
-                            { label: 'Delete Category', description: 'Permanently remove a category', value: 'opt_delete_category', emoji: '🗑️' },
+                            { label: 'Add Auction Product', description: 'Start auction using product from database', value: 'opt_add_auction', emoji: '➕' },
+                            { label: 'Add Product', description: 'Register new product to database', value: 'opt_add_category', emoji: '🏷️' },
+                            { label: 'Edit Product', description: 'Modify existing product in database', value: 'opt_edit_category', emoji: '✏️' },
+                            { label: 'Delete Product', description: 'Permanently remove product from database', value: 'opt_delete_category', emoji: '🗑️' },
                             { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
                         ]);
 
@@ -1415,11 +1418,10 @@ client.on('interactionCreate', async interaction => {
                 if (choice === 'opt_add_auction') {
                     const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('⚖️ Create Auction');
                     modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Digital Goods').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('params').setLabel('Price, Inc, Dur (Mins)').setPlaceholder('e.g. 50000, 5000, 60').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Manual)').setPlaceholder('e.g. PWACCLVL93').setStyle(TextInputStyle.Short).setRequired(false)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID').setPlaceholder('e.g. PWACCLVL93').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) {
@@ -1433,10 +1435,12 @@ client.on('interactionCreate', async interaction => {
                 }
 
                 if (choice === 'opt_add_category') {
-                    const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Category');
+                    const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Product');
                     modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(false)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Pixel World Acc').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Gaming').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) {
@@ -1462,21 +1466,21 @@ client.on('interactionCreate', async interaction => {
                 if (choice === 'opt_edit_category') {
                     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                     const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
-                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No auction categories found to edit.' });
+                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No products found to edit.' });
 
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_pick').setPlaceholder('Select a category to edit...');
-                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
-                    return interaction.editReply({ content: '✏️ **Edit Category**\nSelect a category to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_pick').setPlaceholder('Select a product to edit...');
+                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Cat: ${p.category_name || '—'}`, value: p.id }));
+                    return interaction.editReply({ content: '✏️ **Edit Product**\nSelect a product to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
 
                 if (choice === 'opt_delete_category') {
                     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                     const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
-                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No auction categories found to delete.' });
+                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No products found to delete.' });
 
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick').setPlaceholder('Select a category to DELETE...');
-                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
-                    return interaction.editReply({ content: '🗑️ **Delete Category**\nSelect a category to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick').setPlaceholder('Select a product to DELETE...');
+                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Cat: ${p.category_name || '—'}`, value: p.id }));
+                    return interaction.editReply({ content: '🗑️ **Delete Product**\nSelect a product to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
                 return;
             }
@@ -1594,16 +1598,17 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // ── sel_auction_edit_pick ──────────────────────────
+            // ── sel_auction_edit_pick ────────────────────────
             if (interaction.customId === 'sel_auction_edit_pick') {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p) return interaction.update({ content: '❌ Category not found.', components: [] });
+                if (!p) return interaction.reply({ content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
 
-                const modal = new ModalBuilder().setCustomId(`mod_auction_edit_${pid}`).setTitle(safeTitle('Edit Category', pid));
+                const modal = new ModalBuilder().setCustomId(`mod_auction_edit_${pid}`).setTitle('✏️ Edit Product');
                 modal.addComponents(
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('New Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('New Base Price').setValue(p.price).setStyle(TextInputStyle.Short).setRequired(true))
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setValue(p.category_name || '').setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true))
                 );
                 try { return await interaction.showModal(modal); }
                 catch (e) { console.error('[MODAL] sel_auction_edit_pick failed:', e.message); return; }
@@ -1914,26 +1919,21 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'mod_add_category') {
                 const manualPid = interaction.fields.getTextInputValue('pid')?.trim();
                 const name = interaction.fields.getTextInputValue('name');
+                const category = interaction.fields.getTextInputValue('category');
+                const desc = interaction.fields.getTextInputValue('desc');
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                // Use manual PID or auto-generate
-                const id = manualPid ? manualPid.toUpperCase() : ('AUC_' + name.toUpperCase().replace(/\s+/g, '_') + '_' + Date.now().toString().slice(-4));
-
-                const { error: insertErr } = await safeInsertProduct({
-                    id,
+                const { error: insErr } = await supabase.from('products').insert([{
+                    id: manualPid,
                     name,
-                    price: 'Auction',
-                    stock: 0,
-                    format: 'N/A',
-                    description: '-',
+                    category_name: category,
+                    description: desc,
                     system_type: 'auction'
-                });
+                }]);
 
-                if (insertErr) return interaction.editReply({ content: `❌ Failed to create category: ${insertErr.message}` });
-
-                await interaction.editReply({ content: `✅ Category **${name}** created successfully with ID: \`${id}\`` });
-                updateDashboard();
+                if (insErr) return interaction.editReply({ content: `❌ Failed to create product: ${insErr.message}` });
+                await interaction.editReply({ content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
                 updateStockDashboard();
                 return;
             }
@@ -1942,19 +1942,20 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId.startsWith('mod_auction_edit_')) {
                 const pid = interaction.customId.replace('mod_auction_edit_', '');
                 const name = interaction.fields.getTextInputValue('name');
-                const priceStr = interaction.fields.getTextInputValue('price');
-                const price = priceStr.replace(/[^0-9]/g, '');
+                const category = interaction.fields.getTextInputValue('category');
+                const desc = interaction.fields.getTextInputValue('desc');
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 const { error: updErr } = await supabase.from('products').update({
                     name,
-                    price: `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`
+                    category_name: category,
+                    description: desc
                 }).eq('id', pid);
 
-                if (updErr) return interaction.editReply({ content: `❌ Failed to update category: ${updErr.message}` });
+                if (updErr) return interaction.editReply({ content: `❌ Failed to update product: ${updErr.message}` });
 
-                await interaction.editReply({ content: `✅ Category **${name}** (ID: \`${pid}\`) updated successfully!` });
+                await interaction.editReply({ content: `✅ Product **${name}** (ID: \`${pid}\`) updated successfully!` });
                 updateDashboard();
                 updateStockDashboard();
                 return;
@@ -1962,42 +1963,38 @@ client.on('interactionCreate', async interaction => {
 
             // ── mod_auction_add ──────────────────────────────
             if (interaction.customId === 'mod_auction_add') {
-                const name = interaction.fields.getTextInputValue('name');
-                const category = interaction.fields.getTextInputValue('category');
-                const params = interaction.fields.getTextInputValue('params');
-                const linkedPid = interaction.fields.getTextInputValue('pid') || null;
-                const desc = interaction.fields.getTextInputValue('desc');
+                const pid = interaction.fields.getTextInputValue('pid');
+                const basePriceStr = interaction.fields.getTextInputValue('base_price');
+                const incStr = interaction.fields.getTextInputValue('increment');
+                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                // Parse combined field: price, inc, duration
-                const parts = params.split(/[,\s]+/).map(p => p.trim());
-                if (parts.length < 3) return interaction.editReply({ content: '❌ Invalid format for Price, Inc, Duration. Use: `price, increment, duration`' });
+                // Fetch product details from database
+                const { data: p, error: pErr } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (pErr || !p) return interaction.editReply({ content: `❌ Product ID \`${pid}\` not found in database. Please create it first via 'Add Product'.` });
 
-                const basePrice = parseInt(parts[0].replace(/\D/g, ''));
-                const increment = parseInt(parts[1].replace(/\D/g, ''));
-                const duration = parseInt(parts[2].replace(/\D/g, ''));
-
-                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment))
-                    return interaction.editReply({ content: '❌ Invalid numeric mapping in Price, Inc, or Duration.' });
+                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
+                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
+                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return interaction.editReply({ content: '❌ Invalid price, increment, or duration format.' });
 
                 const endTime = new Date(Date.now() + duration * 60000).toISOString();
 
                 const { error: insertErr } = await supabase.from('auctions').insert([{
-                    name,
-                    category_name: category,
-                    description: desc,
+                    name: p.name,
+                    category_name: p.category_name,
+                    description: p.description,
                     base_price: basePrice,
                     current_bid: basePrice,
                     bid_increment: increment,
-                    product_id: linkedPid,
+                    product_id: pid,
                     status: 'pending',
                     end_time: endTime
                 }]);
 
                 if (insertErr) return interaction.editReply({ content: `❌ Failed to create auction: ${insertErr.message}` });
 
-                await interaction.editReply({ content: `✅ Auction product \`${name}\` created as PENDING. Start it via Settings.` });
+                await interaction.editReply({ content: `✅ Auction for \`${p.name}\` created as PENDING. Start it via Settings.` });
                 updateAuctionDashboard();
                 return;
             }

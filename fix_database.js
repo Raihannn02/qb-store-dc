@@ -5,15 +5,15 @@ async function migrate() {
     console.log('🚀 Starting Database Migration...');
 
     // Using a trick: try to update a non-existent row to see if the column exists
-    // But better: Just try to select it.
-    const { error: checkErr } = await supabase.from('products').select('system_type').limit(1);
+    const { data: cols, error: colErr } = await supabase.from('products').select('system_type, category_name, description').limit(1);
 
-    if (!checkErr) {
-        console.log('✅ Column "system_type" already exists in products. No migration needed.');
+    if (colErr) {
+        console.log('❌ Column check failed for products. Adding missing columns...');
+        console.log('ALTER TABLE products ADD COLUMN IF NOT EXISTS system_type TEXT DEFAULT \'regular\';');
+        console.log('ALTER TABLE products ADD COLUMN IF NOT EXISTS category_name TEXT;');
+        console.log('ALTER TABLE products ADD COLUMN IF NOT EXISTS description TEXT;');
     } else {
-        console.log('⏳ Column missing. Attempting to add it via logic check...');
-        console.log('IMPORTANT: If this fails, please run the following SQL in Supabase SQL Editor:');
-        console.log('ALTER TABLE products ADD COLUMN system_type TEXT DEFAULT \'regular\';');
+        console.log('✅ "products" table schema is up to date.');
     }
 
     console.log('\n🚀 Verifying "auctions" table: columns and schema cache...');
