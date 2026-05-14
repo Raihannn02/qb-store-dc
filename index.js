@@ -247,6 +247,28 @@ async function updateDatabaseEmbed(productId) {
     const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
     if (prodError || !product) {
         console.error(`[DB EMBED] Product '${productId}' not found: ${prodError?.message}`);
+    }
+
+    if (isAuctionProduct(product)) {
+        console.log(`[DB EMBED] Skipping '${productId}' (Auction Product)`);
+
+        // Clean up legacy DB embed if it exists from before it was an auction
+        const config = loadConfig();
+        const msgId = config.monitorMessages?.[productId] || config[`monitor_${productId}`];
+        if (msgId) {
+            const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
+            const channel = await client.channels.fetch(dbChannelId).catch(() => null);
+            if (channel) {
+                const msg = await channel.messages.fetch(msgId).catch(() => null);
+                if (msg) {
+                    await msg.delete().catch(() => { });
+                    console.log(`[DB EMBED] Cleared legacy Live Stock monitor for '${productId}'`);
+                }
+            }
+            if (config.monitorMessages) delete config.monitorMessages[productId];
+            delete config[`monitor_${productId}`];
+            saveConfig(config);
+        }
         return;
     }
 
@@ -2090,11 +2112,12 @@ client.once('clientReady', async () => {
         checkAuctionDeadlines();
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
 
-        // Refresh database monitor embeds on startup
-        const { data: products } = await supabase.from('products').select('id');
-        if (products) {
-            console.log(`[READY] Refreshing ${products.length} product embeds...`);
-            for (const p of products) {
+        // Refresh database monitor embeds on startup (Live Stock Only)
+        const { data: allProducts } = await supabase.from('products').select('*');
+        if (allProducts) {
+            const liveDrops = allProducts.filter(p => !isAuctionProduct(p));
+            console.log(`[READY] Refreshing ${liveDrops.length} Live Stock monitors...`);
+            for (const p of liveDrops) {
                 updateDatabaseEmbed(p.id).catch(e => console.error(`[READY] Failed to update ${p.id}:`, e.message));
             }
         }
