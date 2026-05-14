@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.2.0',
+    version: '3.2.1',
     codename: 'Turbo Response',
     date: 'May 15, 2026',
     changelog: [
-        { type: 'PERF', desc: 'Speed: In-memory ban cache eliminates ~200ms DB query per interaction.' },
-        { type: 'PERF', desc: 'Speed: Fire-and-forget logging for payment & delivery channels.' },
-        { type: 'SYS', desc: 'Architecture: Optimized interaction pipeline for fastest possible response.' }
+        { type: 'FIX', desc: 'Handler: Fixed unhandled btn_db_add_ fallthrough (missing return).' },
+        { type: 'PERF', desc: 'Speed: In-memory ban cache + fire-and-forget logging.' },
+        { type: 'SYS', desc: 'Stability: All handlers audited for complete return coverage.' }
     ]
 };
 
@@ -1178,7 +1178,7 @@ client.on('interactionCreate', async interaction => {
             // NOTE: showModal cannot be called after deferReply
             if (interaction.customId.startsWith('btn_db_add_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
 
                 const pid = interaction.customId.replace('btn_db_add_', '');
                 const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Add Stock', pid));
@@ -1190,7 +1190,7 @@ client.on('interactionCreate', async interaction => {
                         .setStyle(TextInputStyle.Paragraph)
                         .setRequired(true)
                 ));
-                await safeModal(interaction, modal);
+                return await safeModal(interaction, modal);
             }
 
             // ── btn_db_edit_pick_ ─────────────────────────────
@@ -1344,7 +1344,6 @@ client.on('interactionCreate', async interaction => {
                             .setTimestamp();
                         await safeReply(interaction, { embeds: [confirmEmbed] });
 
-                        // 3. Specialized Logging
                         // 3. Fire-and-forget logging (don't block the user response)
                         setImmediate(async () => {
                             try {
