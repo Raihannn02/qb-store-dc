@@ -396,12 +396,22 @@ async function updateAuctionDashboard() {
             }
         }
 
-        const msgs = await channel.messages.fetch({ limit: 10 });
-        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('AUCTION SYSTEM DASHBOARD'));
-        if (botMsg) {
+        const msgs = await channel.messages.fetch({ limit: 50 });
+        const matches = msgs.filter(m =>
+            m.author.id === client.user.id &&
+            m.embeds[0]?.title?.includes('AUCTION SYSTEM DASHBOARD')
+        );
+
+        if (matches.length > 0) {
+            const botMsg = matches.first();
             await botMsg.edit({ embeds: [embed], components: [row] });
             config.auctionMessageId = botMsg.id;
             saveConfig(config);
+
+            // Cleanup
+            for (const [id, msg] of matches) {
+                if (id !== botMsg.id) await msg.delete().catch(() => { });
+            }
         } else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.auctionMessageId = nMsg.id;
@@ -515,12 +525,22 @@ async function updateStockDashboard() {
             }
         }
 
-        const msgs = await channel.messages.fetch({ limit: 10 });
-        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('STOCK MANAGEMENT SYSTEM'));
-        if (botMsg) {
+        const msgs = await channel.messages.fetch({ limit: 50 });
+        const matches = msgs.filter(m =>
+            m.author.id === client.user.id &&
+            m.embeds[0]?.title?.includes('STOCK MANAGEMENT SYSTEM')
+        );
+
+        if (matches.length > 0) {
+            const botMsg = matches.first();
             await botMsg.edit({ embeds: [embed], components: [row] });
             config.stockMessageId = botMsg.id;
             saveConfig(config);
+
+            // Cleanup
+            for (const [id, msg] of matches) {
+                if (id !== botMsg.id) await msg.delete().catch(() => { });
+            }
         } else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.stockMessageId = nMsg.id;
@@ -581,24 +601,29 @@ async function updateVersionDashboard() {
 
     try {
         // Find existing version dashboard message and edit it
-        const messages = await channel.messages.fetch({ limit: 20 });
-        const existing = messages.find(m =>
+        const messages = await channel.messages.fetch({ limit: 50 });
+        const matches = messages.filter(m =>
             m.author.id === client.user.id &&
             m.embeds[0]?.title?.includes('Version Dashboard')
         );
 
-        if (existing) {
-            await existing.edit({ embeds: [embed] });
+        if (matches.length > 0) {
+            const botMsg = matches.first();
+            await botMsg.edit({ embeds: [embed] });
             console.log('[VERSION] Dashboard updated (edited existing).');
+
+            // Cleanup others
+            for (const [id, msg] of matches) {
+                if (id !== botMsg.id) await msg.delete().catch(() => { });
+            }
         } else {
-            // Delete old "Bot Online" embeds if any
+            // Delete old "Bot Online" embeds if any from larger fetch
             const oldEmbeds = messages.filter(m =>
                 m.author.id === client.user.id &&
-                (m.embeds[0]?.title === 'Bot Online' || m.embeds[0]?.title?.includes('Bot Online'))
+                (m.embeds[0]?.title?.includes('Bot Online'))
             );
             for (const [, msg] of oldEmbeds) {
                 await msg.delete().catch(() => { });
-                console.log('[VERSION] Deleted old Bot Online embed.');
             }
 
             await channel.send({ embeds: [embed] });
