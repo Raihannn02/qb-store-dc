@@ -93,30 +93,16 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.8.3',
-    codename: 'Isolation & Resiliency',
-    date: '2026-05-14',
+    version: '2.9.0',
+    codename: 'Stellar Stability+',
+    date: 'May 14, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Stock Management: Dedicated real-time dashboard channel' },
-        { type: 'NEW', desc: 'Management: "Add Category" shortcut in Auction Settings' },
-        { type: 'NEW', desc: 'Automation: Centralized Add/Edit/Delete stock flow' },
-        { type: 'NEW', desc: 'Auction v2: Win Notifications & Auto-Delivery' },
-        { type: 'FIX', desc: 'UI: Polished Auction & Stock layouts with ⚖️/📦 icons' },
-        { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
-        { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
-        { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
-        { type: 'FIX', desc: 'Optimization: Full-system interaction response speedup' },
-        { type: 'NEW', desc: 'Caching: Memory-based config loading (Zero Disk I/O)' },
-        { type: 'FIX', desc: 'Parallelism: Supabase queries now run concurrently' },
-        { type: 'FIX', desc: 'Interaction: Optimized response & stability (10062)' },
-        { type: 'FIX', desc: 'Maintenance: Fixed products ReferenceError in purchase' },
-        { type: 'NEW', desc: 'Maintenance System: Toggle per-product status' },
-        { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
-        { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
-        { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
-        { type: 'NEW', desc: 'Separation: Isolated Live Stock and Auction products via systems' },
-        { type: 'NEW', desc: 'Resiliency: JS-side filtering fallback for missing schema columns' },
-        { type: 'FIX', desc: 'Sync: Persistent dashboard ID tracking across restarts' },
+        { type: 'NEW', desc: 'Manual Product ID field for Auction Categories.' },
+        { type: 'FIX', desc: 'Enforced 45-char limit on Modal Titles (SafeTitle).' },
+        { type: 'FIX', desc: 'Preemptive cleanup for Database Monitor duplicates.' },
+        { type: 'FIX', desc: 'Resolved foreign key constraints during product deletion.' },
+        { type: 'FIX', desc: 'Network resilience with withRetry for all API calls.' },
+        { type: 'SYS', desc: 'Memory-based configuration caching and lock systems.' }
     ]
 };
 
@@ -1412,6 +1398,7 @@ client.on('interactionCreate', async interaction => {
                 if (choice === 'opt_add_category') {
                     const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Category');
                     modal.addComponents(
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(false)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true))
                     );
@@ -1833,13 +1820,16 @@ client.on('interactionCreate', async interaction => {
 
             // ── mod_add_category ────────────────────────────
             if (interaction.customId === 'mod_add_category') {
+                const manualPid = interaction.fields.getTextInputValue('pid')?.trim();
                 const name = interaction.fields.getTextInputValue('name');
                 const priceStr = interaction.fields.getTextInputValue('price');
                 const price = priceStr.replace(/[^0-9]/g, '');
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                const id = 'AUC_' + name.toUpperCase().replace(/\s+/g, '_') + '_' + Date.now().toString().slice(-4);
+                // Use manual PID or auto-generate
+                const id = manualPid ? manualPid.toUpperCase() : ('AUC_' + name.toUpperCase().replace(/\s+/g, '_') + '_' + Date.now().toString().slice(-4));
+
                 const { error: insertErr } = await safeInsertProduct({
                     id,
                     name,
