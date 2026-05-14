@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.3',
-    codename: 'Privacy & Polish',
+    version: '3.0.4',
+    codename: 'Minimalist Elite',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'UI', desc: 'Privacy: Hid sensitive stock data in public delivery logs.' },
-        { type: 'UI', desc: 'Aesthetics: Removed block quotes from status embeds for a cleaner look.' },
-        { type: 'FIX', desc: 'Auction: Optimized fulfillment mapping and footers.' }
+        { type: 'UI', desc: 'Aesthetics: Final minimalist polish (removed all block quotes).' },
+        { type: 'UI', desc: 'Privacy: Enhanced security for public delivery logs.' },
+        { type: 'FIX', desc: 'Auction: Optimized fulfillment and interaction stability.' }
     ]
 };
 
@@ -468,7 +468,7 @@ async function updateAuctionDashboard() {
                 historyText = bids.slice(1).map((b, i) => `**#${i + 2}** <@${b.user_id}> — **${formatPrice(b.amount)}**`).join('\n');
             }
 
-            embed.setDescription(`>>> 🟢 **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
+            embed.setDescription(`🟢 **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
                 .setFields(
                     { name: '📦 Product Information', value: `**Name:** \`${auction.name}\`\n**Category:** \`${auction.category_name || 'Digital'}\`\n**Product ID:** \`${auction.product_id || '-'}\``, inline: false },
                     { name: '📝 Description', value: `${auction.description || 'No description provided.'}`, inline: false },
