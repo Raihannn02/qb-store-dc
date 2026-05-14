@@ -88,15 +88,15 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.7.5',
-    codename: 'Auction Pro+',
+    version: '2.8.0',
+    codename: 'Stock Master',
     date: '2026-05-14',
     changelog: [
-        { type: 'NEW', desc: 'Auction v2.7.5: Integrated Stock Management into Auction Settings' },
-        { type: 'NEW', desc: 'Auction v2: Multi-channel Winner Notifications & Auto-Delivery' },
-        { type: 'FIX', desc: 'Schema: Improved bid_increment handling & cache sync' },
-        { type: 'FIX', desc: 'UI: Polished Auction Dashboard & ⚖️ icon' },
-        { type: 'SYS', desc: 'Reliability: Embed character limit protection (Version Dashboard)' },
+        { type: 'NEW', desc: 'Stock Management: Dedicated real-time dashboard channel' },
+        { type: 'NEW', desc: 'Management: "Add Category" shortcut in Auction Settings' },
+        { type: 'NEW', desc: 'Automation: Centralized Add/Edit/Delete stock flow' },
+        { type: 'NEW', desc: 'Auction v2: Win Notifications & Auto-Delivery' },
+        { type: 'FIX', desc: 'UI: Polished Auction & Stock layouts with ⚖️/📦 icons' },
         { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
         { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
         { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
@@ -407,6 +407,69 @@ async function checkAuctionDeadlines() {
         }
     } catch (e) {
         console.error('[DEADLINE] Worker Error:', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// updateStockDashboard
+// ─────────────────────────────────────────────────────────────
+
+async function updateStockDashboard() {
+    const config = loadConfig();
+    const stockChannelId = process.env.STOCK_MANAGEMENT_CHANNEL_ID;
+    if (!stockChannelId) { console.warn('[STOCK] STOCK_MANAGEMENT_CHANNEL_ID not set.'); return; }
+
+    try {
+        const channel = await client.channels.fetch(stockChannelId).catch(() => null);
+        if (!channel) return;
+
+        const { data: products } = await supabase.from('products').select('*').order('name');
+
+        const embed = new EmbedBuilder()
+            .setTitle('📦  STOCK MANAGEMENT SYSTEM')
+            .setColor('#3498db')
+            .setDescription('>>> Centralized management for categories and digital stock levels.')
+            .setTimestamp();
+
+        if (!products || products.length === 0) {
+            embed.addFields({ name: 'Categories', value: '*None found. Add a category first.*' });
+        } else {
+            const list = products.map(p => `• **${p.name}**\n   ID: \`${p.id}\` | Stock: \`${p.stock}\``).join('\n\n');
+            embed.setDescription(`>>> **Manage your product categories and stock levels below.**\n\n${list.slice(0, 3500)}`);
+        }
+
+        embed.addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('btn_stock_mgmt_add').setLabel('Add Stock').setStyle(ButtonStyle.Success).setEmoji('➕'),
+            new ButtonBuilder().setCustomId('btn_stock_mgmt_edit').setLabel('Edit Stock').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
+            new ButtonBuilder().setCustomId('btn_stock_mgmt_del').setLabel('Delete Stock').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
+        );
+
+        if (config.stockMessageId) {
+            try {
+                const msg = await channel.messages.fetch(config.stockMessageId);
+                await msg.edit({ embeds: [embed], components: [row] });
+                return;
+            } catch {
+                config.stockMessageId = null;
+                saveConfig(config);
+            }
+        }
+
+        const msgs = await channel.messages.fetch({ limit: 10 });
+        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('STOCK MANAGEMENT SYSTEM'));
+        if (botMsg) {
+            await botMsg.edit({ embeds: [embed], components: [row] });
+            config.stockMessageId = botMsg.id;
+            saveConfig(config);
+        } else {
+            const nMsg = await channel.send({ embeds: [embed], components: [row] });
+            config.stockMessageId = nMsg.id;
+            saveConfig(config);
+        }
+    } catch (e) {
+        console.error('Stock Dashboard Update Error:', e);
     }
 }
 
@@ -854,6 +917,42 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
             }
 
+            // ── btn_stock_mgmt_add ───────────────────────────
+            if (interaction.customId === 'btn_stock_mgmt_add') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found. Please add a category first.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_add_pick').setPlaceholder('Select a category to add stock to...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return interaction.editReply({ content: '📦 **Add Stock**\nSelect the target category:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_stock_mgmt_edit ──────────────────────────
+            if (interaction.customId === 'btn_stock_mgmt_edit') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_edit_pick').setPlaceholder('Select a category to edit its stock...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return interaction.editReply({ content: '✏️ **Edit Stock**\nSelect the category whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_stock_mgmt_del ───────────────────────────
+            if (interaction.customId === 'btn_stock_mgmt_del') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: products } = await supabase.from('products').select('*').order('name');
+                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_del_pick').setPlaceholder('Select a category to delete its stock item...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return interaction.editReply({ content: '🗑️ **Delete Stock**\nSelect the category whose stock item you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
             // ── btn_check_pay_ ────────────────────────────────
             if (interaction.customId.startsWith('btn_check_pay_')) {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -1241,14 +1340,14 @@ client.on('interactionCreate', async interaction => {
                     catch (e) { console.error('[MODAL] opt_add_auction showModal failed:', e.message); return; }
                 }
 
-                if (choice === 'opt_add_auction_stock') {
-                    const modal = new ModalBuilder().setCustomId('mod_auction_add_stock').setTitle('📦 Add Stock Data');
+                if (choice === 'opt_add_category') {
+                    const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Category');
                     modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID').setPlaceholder('Enter the ID of the product...').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2\nitem3...').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
-                    catch (e) { console.error('[MODAL] opt_add_auction_stock failed:', e.message); return; }
+                    catch (e) { console.error('[MODAL] opt_add_category failed:', e.message); return; }
                 }
 
                 if (choice === 'opt_toggle_auction') {
@@ -1261,6 +1360,41 @@ client.on('interactionCreate', async interaction => {
                     return interaction.editReply({ content: '⚙️ **Auction Manager**\nSelect an auction to toggle its status:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
                 return;
+            }
+
+            // ── sel_stock_add_pick ───────────────────────────
+            if (interaction.customId === 'sel_stock_add_pick') {
+                const pid = interaction.values[0];
+                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(`Add Stock | ${pid}`); // Reusing mod_auction_add_stock
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Confirmed Product ID').setValue(pid).setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2...').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                );
+                return interaction.showModal(modal);
+            }
+
+            // ── sel_stock_edit_pick ──────────────────────────
+            if (interaction.customId === 'sel_stock_edit_pick') {
+                const pid = interaction.values[0];
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to edit.' });
+
+                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_edit_${pid}`).setPlaceholder('Select an entry to edit...');
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
+                return interaction.editReply({ content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
+            }
+
+            // ── sel_stock_del_pick ───────────────────────────
+            if (interaction.customId === 'sel_stock_del_pick') {
+                const pid = interaction.values[0];
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to delete.' });
+
+                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select an entry to delete...');
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
+                return interaction.editReply({ content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
             }
 
             // ── sel_auction_toggle_pick ──────────────────────
@@ -1627,6 +1761,32 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // ── mod_add_category ────────────────────────────
+            if (interaction.customId === 'mod_add_category') {
+                const name = interaction.fields.getTextInputValue('name');
+                const priceStr = interaction.fields.getTextInputValue('price');
+                const price = priceStr.replace(/[^0-9]/g, '');
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const id = name.toUpperCase().replace(/\s+/g, '_') + '_' + Date.now().toString().slice(-4);
+                const { error: insertErr } = await supabase.from('products').insert([{
+                    id,
+                    name,
+                    price: `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`,
+                    stock: 0,
+                    format: 'N/A',
+                    description: '-'
+                }]);
+
+                if (insertErr) return interaction.editReply({ content: `❌ Failed to create category: ${insertErr.message}` });
+
+                await interaction.editReply({ content: `✅ Category **${name}** created successfully with ID: \`${id}\`` });
+                updateDashboard();
+                updateStockDashboard();
+                return;
+            }
+
             // ── mod_auction_add ──────────────────────────────
             if (interaction.customId === 'mod_auction_add') {
                 const name = interaction.fields.getTextInputValue('name');
@@ -1752,6 +1912,7 @@ client.on('interactionCreate', async interaction => {
 
                 await interaction.editReply({ content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
                 updateDashboard();
+                updateStockDashboard();
                 updateDatabaseEmbed(pid).catch(() => { });
                 return;
             }
@@ -1785,6 +1946,7 @@ client.once('clientReady', async () => {
     updateDashboard();
     updateVersionDashboard();
     updateAuctionDashboard();
+    updateStockDashboard();
     checkAuctionDeadlines();
     updateHoneypotWarning();
 
@@ -1803,6 +1965,7 @@ client.once('clientReady', async () => {
         updateDashboard();
         updateVersionDashboard();
         updateAuctionDashboard();
+        updateStockDashboard();
         checkAuctionDeadlines();
         updateHoneypotWarning();
     }, interval);
