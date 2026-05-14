@@ -356,9 +356,13 @@ async function updateVersionDashboard() {
     if (!channel) { console.error(`[VERSION] Channel '${channelId}' not accessible.`); return; }
 
     const tagMap = { NEW: '`[NEW]`', FIX: '`[FIX]`', SYSTEM: '`[SYS]`' };
-    const changelogLines = BOT_VERSION.changelog.map(
+    let changelogLines = BOT_VERSION.changelog.map(
         c => `${tagMap[c.type] || '`[---]`'}  ${c.desc}`
     ).join('\n');
+
+    if (changelogLines.length > 1024) {
+        changelogLines = changelogLines.slice(0, 1021) + '...';
+    }
 
     const uptime = process.uptime();
     const hrs = Math.floor(uptime / 3600);
