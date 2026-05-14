@@ -93,11 +93,12 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.4',
+    version: '2.9.5',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Database: Resolved schema cache and Add Auction verification.' },
+        { type: 'SYS', desc: 'Resolved Unknown interaction spam on inactive Modals.' },
+        { type: 'FIX', desc: 'Database: Resolved schema cache and product_id verification.' },
         { type: 'NEW', desc: 'Auction UI: Removed Price field from Add Category.' },
         { type: 'FIX', desc: 'Discord UI: Resolved duplicate Database Monitor embeds in Stock channel.' },
         { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
@@ -1420,7 +1421,14 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Optional)').setPlaceholder('e.g. 1499...').setStyle(TextInputStyle.Short).setRequired(false))
                     );
                     try { return await interaction.showModal(modal); }
-                    catch (e) { console.error('[MODAL] opt_add_auction showModal failed:', e.message); return; }
+                    catch (e) {
+                        if (e.code === 10062 || String(e.message).includes('Unknown interaction')) {
+                            console.warn('[MODAL] Token expired for opt_add_auction (select menu dropped). User must reload the settings menu.');
+                        } else {
+                            console.error('[MODAL] opt_add_auction showModal failed:', e.message);
+                        }
+                        return;
+                    }
                 }
 
                 if (choice === 'opt_add_category') {
@@ -1430,7 +1438,14 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
-                    catch (e) { console.error('[MODAL] opt_add_category failed:', e.message); return; }
+                    catch (e) {
+                        if (e.code === 10062 || String(e.message).includes('Unknown interaction')) {
+                            console.warn('[MODAL] Token expired for opt_add_category (select menu dropped). User must reload the settings menu.');
+                        } else {
+                            console.error('[MODAL] opt_add_category failed:', e.message);
+                        }
+                        return;
+                    }
                 }
 
                 if (choice === 'opt_toggle_auction') {
