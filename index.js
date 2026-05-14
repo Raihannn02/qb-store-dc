@@ -93,14 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.2',
-    codename: 'Resilient Elite',
+    version: '3.0.3',
+    codename: 'Privacy & Polish',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Auction: Fixed stock lookup bug (using actual product_id for fulfillment).' },
-        { type: 'SYS', desc: 'Stability: Enhanced interaction handling for modals and deferrals.' },
-        { type: 'UI', desc: 'Elite UI: Cleaned footers (timestamp only) for minimal look.' },
-        { type: 'FIX', desc: 'Auction: Optimized zero-latency mod_open_bid trigger.' }
+        { type: 'UI', desc: 'Privacy: Hid sensitive stock data in public delivery logs.' },
+        { type: 'UI', desc: 'Aesthetics: Removed block quotes from status embeds for a cleaner look.' },
+        { type: 'FIX', desc: 'Auction: Optimized fulfillment mapping and footers.' }
     ]
 };
 
@@ -450,7 +449,7 @@ async function updateAuctionDashboard() {
             .setTimestamp();
 
         if (!auction) {
-            embed.setDescription('>>> 🛑 **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
+            embed.setDescription('🛑 **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
                 .addFields({ name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
             const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
@@ -568,7 +567,7 @@ async function endAuction(aid) {
             const winEmbed = new EmbedBuilder()
                 .setTitle('🏆  AUCTION CONCLUDED')
                 .setColor('#f1c40f')
-                .setDescription(`>>> The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has been notified via DM to finalize the transaction.*`)
+                .setDescription(`The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has been notified via DM to finalize the transaction.*`)
                 .setTimestamp();
             await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
         }
@@ -597,7 +596,7 @@ async function endAuction(aid) {
                     const embed = new EmbedBuilder()
                         .setTitle('🏆  AUCTION VICTORY!')
                         .setColor('#f1c40f')
-                        .setDescription(`>>> Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below within 24 hours to finalize your acquisition.`)
+                        .setDescription(`Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below within 24 hours to finalize your acquisition.`)
                         .addFields(
                             { name: '📦 Item', value: `\`${auction.name}\``, inline: true },
                             { name: '💰 Final Bid', value: `**${formatPrice(finalAmount)}**`, inline: true },
@@ -1223,7 +1222,7 @@ client.on('interactionCreate', async interaction => {
                                     .addFields(
                                         { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                        { name: 'Stock Delivered', value: `\`\`\`\n${deliver.join('\n')}\n\`\`\``, inline: false }
+                                        { name: 'Status', value: '📦 `Check your DM for product delivery`', inline: false }
                                     )
                                     .setTimestamp();
                                 await deliveryChan.send({ embeds: [deliveryEmbed] }).catch(() => { });
