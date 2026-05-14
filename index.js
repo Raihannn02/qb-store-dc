@@ -771,23 +771,29 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_auction_settings ──────────────────────────
             if (interaction.customId === 'btn_auction_settings') {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return interaction.reply({ content: '❌ Only admins can access settings.', flags: [MessageFlags.Ephemeral] });
+                try {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                const menu = new StringSelectMenuBuilder()
-                    .setCustomId('sel_auction_admin')
-                    .setPlaceholder('Auction Management...')
-                    .addOptions([
-                        { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
-                        { label: 'Add Stock Data', description: 'Quickly add products to stock', value: 'opt_add_auction_stock', emoji: '📦' },
-                        { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
-                    ]);
+                    if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                        return interaction.editReply({ content: '❌ Only admins can access settings.' });
 
-                return interaction.reply({
-                    content: '🛠️ **Auction Admin Menu**',
-                    components: [new ActionRowBuilder().addComponents(menu)],
-                    flags: [MessageFlags.Ephemeral]
-                });
+                    const menu = new StringSelectMenuBuilder()
+                        .setCustomId('sel_auction_admin')
+                        .setPlaceholder('Auction Management...')
+                        .addOptions([
+                            { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
+                            { label: 'Add Stock Data', description: 'Quickly add products to stock', value: 'opt_add_auction_stock', emoji: '📦' },
+                            { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
+                        ]);
+
+                    return interaction.editReply({
+                        content: '🛠️ **Auction Admin Menu**\nChoose an option below:',
+                        components: [new ActionRowBuilder().addComponents(menu)]
+                    });
+                } catch (err) {
+                    if (err.code !== 10062) console.error('[ERROR] btn_auction_settings failed:', err.message);
+                }
+                return;
             }
 
             // ── btn_db_add_ ───────────────────────────────────
