@@ -19,29 +19,23 @@ async function migrate() {
     console.log('\n🚀 Verifying "auctions" table: columns and schema cache...');
     const { error: aucErr } = await supabase.from('auctions').select('bid_increment, product_id, category_name').limit(1);
 
-    if (!aucErr) {
-        console.log('✅ "auctions" table columns (bid_increment, product_id, category_name) are configured and cached.');
-    } else {
+    if (aucErr) {
         console.log('❌ "auctions" table check failed or columns missing.');
-        console.log('IMPORTANT: To fix schema cache errors when creating an auction, please run the following SQL in Supabase SQL Editor:\n');
-        console.log('CREATE TABLE IF NOT EXISTS auctions (');
-        console.log('  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,');
-        console.log('  name TEXT NOT NULL,');
-        console.log('  category_name TEXT,');
-        console.log('  description TEXT,');
-        console.log('  base_price BIGINT NOT NULL,');
-        console.log('  current_bid BIGINT NOT NULL,');
-        console.log('  bid_increment BIGINT DEFAULT 5000,');
-        console.log('  highest_bidder_id TEXT,');
-        console.log('  product_id TEXT,');
-        console.log('  status TEXT DEFAULT \'pending\',');
-        console.log('  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),');
-        console.log('  end_time TIMESTAMP WITH TIME ZONE');
-        console.log(');');
+        console.log('IMPORTANT: Run the following SQL in Supabase SQL Editor:');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS bid_increment BIGINT DEFAULT 5000;');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS product_id TEXT;');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS category_name TEXT;');
-        console.log('\n-- Create auction_bids table for history');
+    } else {
+        console.log('✅ "auctions" table columns are configured.');
+    }
+
+    console.log('\n🚀 Verifying "auction_bids" table (History Tracking)...');
+    const { error: bidErr } = await supabase.from('auction_bids').select('id').limit(1);
+
+    if (bidErr) {
+        console.log('❌ "auction_bids" table is missing.');
+        console.log('IMPORTANT: Run the following SQL in Supabase SQL Editor:\n');
+        console.log('-- Create auction_bids table for history tracking');
         console.log('CREATE TABLE IF NOT EXISTS auction_bids (');
         console.log('  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,');
         console.log('  auction_id UUID REFERENCES auctions(id) ON DELETE CASCADE,');
@@ -50,6 +44,8 @@ async function migrate() {
         console.log('  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
         console.log(');');
         console.log('\n⚠️ VERY IMPORTANT: After running the query, go to Supabase Settings -> API -> Tables & Views -> and click "Reload Schema Cache"!');
+    } else {
+        console.log('✅ "auction_bids" table is ready.');
     }
 
     // Note: supabase-js cannot run ALTER TABLE directly unless a custom RPC is defined.
