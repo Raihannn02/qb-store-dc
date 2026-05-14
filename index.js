@@ -236,9 +236,22 @@ async function updateDatabaseEmbed(productId) {
     try {
         await withRetry(async () => {
             const messages = await channel.messages.fetch({ limit: 50 });
-            const existing = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.footer?.text?.includes(productId));
-            if (existing) await existing.edit({ embeds: [embed], components: [row] });
-            else await channel.send({ embeds: [embed], components: [row] });
+            const matches = messages.filter(m =>
+                m.author.id === client.user.id &&
+                m.embeds[0]?.footer?.text?.includes(productId)
+            );
+
+            if (matches.length > 0) {
+                const botMsg = matches.first();
+                await botMsg.edit({ embeds: [embed], components: [row] });
+
+                // CLEANUP: Delete other duplicates for this product ID
+                for (const [id, msg] of matches) {
+                    if (id !== botMsg.id) await msg.delete().catch(() => { });
+                }
+            } else {
+                await channel.send({ embeds: [embed], components: [row] });
+            }
         }, 3, 2000);
         console.log(`[DB EMBED] Embed updated for '${productId}'`);
     } catch (err) {
@@ -728,11 +741,21 @@ async function updateHoneypotWarning() {
         .setTimestamp();
 
     try {
-        const messages = await channel.messages.fetch({ limit: 10 });
-        const existing = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Honeypot Protection'));
-        if (existing) {
-            await existing.edit({ embeds: [embed] });
+        const messages = await channel.messages.fetch({ limit: 50 });
+        const matches = messages.filter(m =>
+            m.author.id === client.user.id &&
+            m.embeds[0]?.title?.includes('Honeypot Protection')
+        );
+
+        if (matches.length > 0) {
+            const botMsg = matches.first();
+            await botMsg.edit({ embeds: [embed] });
             console.log('[HONEYPOT] Warning embed edited.');
+
+            // CLEANUP: Delete other honeypot warning duplicates
+            for (const [id, msg] of matches) {
+                if (id !== botMsg.id) await msg.delete().catch(() => { });
+            }
         } else {
             // Delete all other messages in honeypot channel to keep it clean
             for (const [, msg] of messages) {
