@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.9',
-    codename: 'Ultimate Response',
+    version: '3.1.0',
+    codename: 'Zero-Latency',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Interaction: Total purge of manual response methods (No more AlreadyReplied).' },
-        { type: 'SYS', desc: 'Stability: Implemented safeUpdate for unified silent component handling.' },
-        { type: 'FIX', desc: 'Bot: Maximum stability for high-frequency admin & auction menu clicks.' }
+        { type: 'SYS', desc: 'Architecture: Instant-Acknowledge Engine implemented for 100% stable responses.' },
+        { type: 'FIX', desc: 'Interaction: Resolved "This interaction failed" by prioritizing API deferral.' },
+        { type: 'PERF', desc: 'System: Optimized background refresh loops and interval management.' }
     ]
 };
 
@@ -1021,21 +1021,26 @@ async function safeDeferUpdate(interaction) {
 
 client.on('interactionCreate', async interaction => {
     try {
-        console.log(`[INTERACTION] ${interaction.user.tag} (${interaction.user.id}) triggered ${interaction.type} (ID: ${interaction.customId || "N/A"})`);
-
-        // ── 1. IMMEDIATE DEFERRAL (Secure the 3s window) ──
-        // Only defer if it's NOT a Modal Trigger (you can't showModal after deferring)
+        // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
+        // Determine if we should defer (Buttons/Menus) or skip (Modals)
         const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick'];
         const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
             (interaction.isStringSelectMenu() && selectModalOptions.includes(interaction.values[0]));
 
+        // Secure the 3-second window IMMEDIATELY
         if (interaction.isRepliable() && !isModalTrigger && !interaction.isModalSubmit()) {
-            await safeDefer(interaction);
+            if (interaction.isButton() || interaction.isStringSelectMenu()) {
+                await safeDeferUpdate(interaction); // Fastest way for components
+            } else {
+                await safeDefer(interaction); // For commands
+            }
         }
 
-        // ── 2. Global Banned Check ──
+        // ── 2. LOGGING & SECURITY (Priority #2 - Occurs after acknowledgement) ──
+        console.log(`[INTERACTION] ${interaction.user.tag} (${interaction.user.id}) -> ${interaction.customId || "N/A"}`);
+
         const { data: banData } = await supabase.from('banned_users').select('id, reason').eq('id', interaction.user.id).single();
         if (banData) {
             const content = `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${banData.reason || 'Violation of terms'}\``;
@@ -1061,11 +1066,11 @@ client.on('interactionCreate', async interaction => {
                     supabase.from('products').select('*').order('name')
                 ]);
 
-                if (!userRes.data) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
+                if (!userRes.data) return safeReply(interaction, { content: '❌ Please register first by clicking the **Register** button.' });
 
                 const products = (productsRes.data || []).filter(p => !isAuctionProduct(p));
                 const config = loadConfig();
-                if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products available at the moment.' });
+                if (!products || products.length === 0) return safeReply(interaction, { content: '❌ No products available at the moment.' });
 
                 const s = new StringSelectMenuBuilder()
                     .setCustomId('sel_buy')
@@ -2274,23 +2279,27 @@ client.once('clientReady', async () => {
         }
 
         const config = loadConfig();
-        const interval = Math.max(30000, config.updateInterval || 45000); // 45s recommended for stability
+        const interval = Math.max(60000, config.updateInterval || 60000); // 60s optimized for VPS stability
 
         // Wait for initial syncs to settle before starting loop
         setTimeout(() => {
             console.log(`[LOOP] Starting background refresh every ${interval / 1000}s...`);
             setInterval(async () => {
                 try {
+                    // Update sequentially with slight delays to avoid Supabase/Discord pooling limits
                     await updateDashboard().catch(() => { });
+                    await new Promise(r => setTimeout(r, 2000));
                     await updateStockDashboard().catch(() => { });
+                    await new Promise(r => setTimeout(r, 2000));
                     await updateAuctionDashboard().catch(() => { });
+                    await new Promise(r => setTimeout(r, 2000));
                     updateVersionDashboard().catch(() => { });
                     checkAuctionDeadlines();
                     checkAuctionSettlements();
                     updateHoneypotWarning();
                 } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
             }, interval);
-        }, 10000);
+        }, 15000);
     } catch (e) {
         console.error('[FATAL] Readiness failed:', e);
     }
