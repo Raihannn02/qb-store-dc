@@ -27,6 +27,11 @@ function safeStr(val, fallback = '—') {
     return s.length > 0 ? s : fallback;
 }
 
+function safeTitle(prefix, text) {
+    const combined = `${prefix} | ${text}`;
+    return combined.length > 45 ? (combined.slice(0, 42) + '...') : combined;
+}
+
 function safeField(name, value, inline = false) {
     const n = safeStr(name);
     const v = safeStr(value);
@@ -874,7 +879,7 @@ client.on('interactionCreate', async interaction => {
                 const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
                 if (!auction) return interaction.reply({ content: '❌ There is no active auction.', flags: [MessageFlags.Ephemeral] });
 
-                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(`💰 Place Bid | ${auction.name}`);
+                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(safeTitle('💰 Place Bid', auction.name));
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
@@ -915,7 +920,7 @@ client.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
 
                 const pid = interaction.customId.replace('btn_db_add_', '');
-                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(`Add Stock | ${pid}`);
+                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Add Stock', pid));
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder()
                         .setCustomId('data')
@@ -1298,7 +1303,7 @@ client.on('interactionCreate', async interaction => {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p) return interaction.update({ content: '❌ Product not found.', components: [] });
-                const modal = new ModalBuilder().setCustomId(`mod_p_edit_${pid}`).setTitle(`Edit Product | ${pid}`);
+                const modal = new ModalBuilder().setCustomId(`mod_p_edit_${pid}`).setTitle(safeTitle('Edit Product', pid));
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('New Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('New Price').setValue(p.price).setStyle(TextInputStyle.Short).setRequired(true)),
@@ -1429,7 +1434,7 @@ client.on('interactionCreate', async interaction => {
             // ── sel_stock_add_pick ───────────────────────────
             if (interaction.customId === 'sel_stock_add_pick') {
                 const pid = interaction.values[0];
-                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(`Add Stock | ${pid}`); // Reusing mod_auction_add_stock
+                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(safeTitle('Add Stock', pid)); // Reusing mod_auction_add_stock
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Confirmed Product ID').setValue(pid).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2...').setStyle(TextInputStyle.Paragraph).setRequired(true))
