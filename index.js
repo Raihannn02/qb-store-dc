@@ -149,8 +149,10 @@ async function updateDatabaseEmbed(productId) {
     }
 
     const config = loadConfig();
-    const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
-    if (!dbChannelId) { console.warn('[DB EMBED] DATABASE_CHANNEL_ID not set.'); return; }
+    const isAuction = product.system_type === 'auction';
+    const dbChannelId = isAuction ? process.env.STOCK_MANAGEMENT_CHANNEL_ID : (process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId);
+
+    if (!dbChannelId) { console.warn(`[DB EMBED] Channel ID not set for type: ${product.system_type}`); return; }
 
     const channel = await client.channels.fetch(dbChannelId).catch(() => null);
     if (!channel) { console.error(`[DB EMBED] Channel '${dbChannelId}' not accessible.`); return; }
@@ -226,7 +228,7 @@ async function registerCommands() {
 
 async function updateDashboard() {
     const config = loadConfig();
-    const { data: products, error } = await supabase.from('products').select('*').order('name');
+    const { data: products, error } = await supabase.from('products').select('*').eq('system_type', 'regular').order('name');
     if (error || !config || !products) return;
 
     try {
@@ -423,7 +425,7 @@ async function updateStockDashboard() {
         const channel = await client.channels.fetch(stockChannelId).catch(() => null);
         if (!channel) return;
 
-        const { data: products } = await supabase.from('products').select('*').order('name');
+        const { data: products } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
 
         const embed = new EmbedBuilder()
             .setTitle('📦  STOCK MANAGEMENT SYSTEM')
@@ -746,7 +748,7 @@ client.on('interactionCreate', async interaction => {
                 // Parallelize user check and products fetch
                 const [userRes, productsRes] = await Promise.all([
                     supabase.from('users').select('id').eq('id', interaction.user.id).single(),
-                    supabase.from('products').select('*').order('name')
+                    supabase.from('products').select('*').eq('system_type', 'regular').order('name')
                 ]);
 
                 if (!userRes.data) return interaction.editReply({ content: '❌ Please register first by clicking the **Register** button.' });
@@ -920,7 +922,7 @@ client.on('interactionCreate', async interaction => {
             // ── btn_stock_mgmt_add ───────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_add') {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                const { data: products } = await supabase.from('products').select('*').order('name');
+                const { data: products } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
                 if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found. Please add a category first.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_add_pick').setPlaceholder('Select a category to add stock to...');
@@ -932,7 +934,7 @@ client.on('interactionCreate', async interaction => {
             // ── btn_stock_mgmt_edit ──────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_edit') {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                const { data: products } = await supabase.from('products').select('*').order('name');
+                const { data: products } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
                 if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_edit_pick').setPlaceholder('Select a category to edit its stock...');
@@ -944,7 +946,7 @@ client.on('interactionCreate', async interaction => {
             // ── btn_stock_mgmt_del ───────────────────────────
             if (interaction.customId === 'btn_stock_mgmt_del') {
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                const { data: products } = await supabase.from('products').select('*').order('name');
+                const { data: products } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
                 if (!products || products.length === 0) return interaction.editReply({ content: '❌ No categories found.' });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_del_pick').setPlaceholder('Select a category to delete its stock item...');
@@ -1154,7 +1156,7 @@ client.on('interactionCreate', async interaction => {
 
                 if (choice === 'opt_edit_p') {
                     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    const { data: products } = await supabase.from('products').select('*').eq('system_type', 'regular').order('name');
                     if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products to edit.' });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_edit_pick').setPlaceholder('Select a product to edit...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
@@ -1163,7 +1165,7 @@ client.on('interactionCreate', async interaction => {
 
                 if (choice === 'opt_del_p') {
                     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    const { data: products } = await supabase.from('products').select('*').eq('system_type', 'regular').order('name');
                     if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products to delete.' });
                     const menu = new StringSelectMenuBuilder().setCustomId('sel_p_del_pick').setPlaceholder('Select a product to DELETE...');
                     products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
@@ -1181,7 +1183,7 @@ client.on('interactionCreate', async interaction => {
 
                 if (choice === 'opt_maintenance') {
                     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                    const { data: products } = await supabase.from('products').select('*').order('name');
+                    const { data: products } = await supabase.from('products').select('*').eq('system_type', 'regular').order('name');
                     if (!products || products.length === 0) return interaction.editReply({ content: '❌ No products found.' });
 
                     const config = loadConfig();
@@ -1505,7 +1507,8 @@ client.on('interactionCreate', async interaction => {
                     stock: 0,
                     price: formatPrice(price),
                     format,
-                    description: desc
+                    description: desc,
+                    system_type: 'regular'
                 }]);
 
                 if (insertErr) return interaction.editReply({ content: `❌ Failed to add product: ${insertErr.message}` });
@@ -1776,7 +1779,8 @@ client.on('interactionCreate', async interaction => {
                     price: `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`,
                     stock: 0,
                     format: 'N/A',
-                    description: '-'
+                    description: '-',
+                    system_type: 'auction'
                 }]);
 
                 if (insertErr) return interaction.editReply({ content: `❌ Failed to create category: ${insertErr.message}` });
