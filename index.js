@@ -309,7 +309,11 @@ async function updateDashboard() {
         }
 
         const msgs = await channel.messages.fetch({ limit: 20 });
-        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Shop Dashboard'));
+        const targetTitle = (config.embed?.title || 'Shop Dashboard').toUpperCase();
+        const botMsg = msgs.find(m =>
+            m.author.id === client.user.id &&
+            m.embeds[0]?.title?.toUpperCase().includes(targetTitle)
+        );
         if (botMsg) {
             await botMsg.edit({ embeds: [embed], components: [row] });
             config.dashboardMessageId = botMsg.id;
