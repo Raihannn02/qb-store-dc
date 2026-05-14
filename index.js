@@ -212,24 +212,37 @@ function isAuctionProduct(p) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// CONFIG HELPERS
+// CONFIG HELPERS (Memory Optimized)
 // ─────────────────────────────────────────────────────────────
 
+let CONFIG_CACHE = null;
+
 function loadConfig() {
+    if (CONFIG_CACHE) return CONFIG_CACHE;
     try {
-        if (!fs.existsSync(configPath)) return {};
+        if (!fs.existsSync(configPath)) {
+            CONFIG_CACHE = {};
+            return CONFIG_CACHE;
+        }
         const data = fs.readFileSync(configPath, 'utf8');
-        return JSON.parse(data);
-    } catch (err) { console.error('Error loading config:', err); return {}; }
+        CONFIG_CACHE = JSON.parse(data);
+        return CONFIG_CACHE;
+    } catch (err) {
+        console.error('Error loading config:', err);
+        return CONFIG_CACHE || {};
+    }
 }
 
 function saveConfig(data) {
     try {
-        fs.writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf8');
-        console.log('[CONFIG] Successfully saved to disk.');
+        CONFIG_CACHE = { ...data };
+        fs.writeFileSync(configPath, JSON.stringify(CONFIG_CACHE, null, 2), 'utf8');
         return true;
     }
-    catch (err) { console.error('Error saving config:', err); return false; }
+    catch (err) {
+        console.error('Error saving config:', err);
+        return false;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2009,15 +2022,20 @@ client.once('clientReady', async () => {
         }
 
         const config = loadConfig();
-        const interval = Math.max(5000, config.updateInterval || 15000);
-        setInterval(() => {
-            updateDashboard();
-            updateVersionDashboard();
-            updateAuctionDashboard();
-            updateStockDashboard();
-            checkAuctionDeadlines();
-            updateHoneypotWarning();
-        }, interval);
+        const interval = Math.max(10000, config.updateInterval || 30000); // 30s recommended for stability
+
+        // Wait for initial syncs to settle before starting loop
+        setTimeout(() => {
+            console.log(`[LOOP] Starting background refresh every ${interval / 1000}s...`);
+            setInterval(() => {
+                updateDashboard();
+                updateVersionDashboard();
+                updateAuctionDashboard();
+                updateStockDashboard();
+                checkAuctionDeadlines();
+                updateHoneypotWarning();
+            }, interval);
+        }, 5000);
     } catch (e) {
         console.error('[FATAL] Readiness failed:', e);
     }
