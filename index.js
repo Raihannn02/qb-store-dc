@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.1.1',
-    codename: 'Precision Response',
+    version: '3.2.0',
+    codename: 'Turbo Response',
     date: 'May 15, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Critical: Fixed deferUpdate regression that broke all button/menu replies.' },
-        { type: 'SYS', desc: 'Architecture: Unified global deferReply for all non-modal interactions.' },
-        { type: 'PERF', desc: 'System: Instant-Acknowledge ordering preserved (defer BEFORE logging).' }
+        { type: 'PERF', desc: 'Speed: In-memory ban cache eliminates ~200ms DB query per interaction.' },
+        { type: 'PERF', desc: 'Speed: Fire-and-forget logging for payment & delivery channels.' },
+        { type: 'SYS', desc: 'Architecture: Optimized interaction pipeline for fastest possible response.' }
     ]
 };
 
@@ -108,6 +108,17 @@ const BOT_VERSION = {
 // ─────────────────────────────────────────────────────────────
 
 let AUCTION_CACHE = { active: false, name: '' };
+
+// In-memory ban cache for ultra-fast (0ms) interaction security
+const banCache = new Map();
+async function refreshBanCache() {
+    try {
+        const { data } = await supabase.from('banned_users').select('id, reason');
+        banCache.clear();
+        if (data) data.forEach(b => banCache.set(b.id, b.reason || 'Violation of terms'));
+        console.log(`[BAN-CACHE] Refreshed: ${banCache.size} banned users cached.`);
+    } catch (e) { console.warn('[BAN-CACHE] Refresh failed:', e.message); }
+}
 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD SYNC & LOCKS
@@ -639,6 +650,7 @@ async function checkAuctionSettlements() {
 
             // 1. Permanent Ban
             await supabase.from('banned_users').upsert([{ id: userId, reason: 'Auction Payment Default (Fake/Troll Bid)', created_at: new Date().toISOString() }]);
+            banCache.set(userId, 'Auction Payment Default (Fake/Troll Bid)'); // Sync cache instantly
 
             // 2. Remove fake bids
             await supabase.from('auction_bids').delete().eq('auction_id', aid).eq('user_id', userId);
@@ -1036,12 +1048,12 @@ client.on('interactionCreate', async interaction => {
         }
 
         // ── 2. LOGGING & SECURITY (Priority #2 - Occurs after acknowledgement) ──
-        console.log(`[INTERACTION] ${interaction.user.tag} (${interaction.user.id}) -> ${interaction.customId || "N/A"}`);
+        console.log(`[INTERACTION] ${interaction.user.tag} -> ${interaction.customId || 'N/A'}`);
 
-        const { data: banData } = await supabase.from('banned_users').select('id, reason').eq('id', interaction.user.id).single();
-        if (banData) {
-            const content = `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${banData.reason || 'Violation of terms'}\``;
-            return safeReply(interaction, { content, flags: [MessageFlags.Ephemeral] });
+        // Ultra-fast ban check from memory cache (0ms vs ~200ms Supabase query)
+        if (banCache.has(interaction.user.id)) {
+            const reason = banCache.get(interaction.user.id);
+            return safeReply(interaction, { content: `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${reason}\``, flags: [MessageFlags.Ephemeral] });
         }
 
         // ── SLASH COMMANDS (disabled) ─────────────────────────
@@ -1333,62 +1345,55 @@ client.on('interactionCreate', async interaction => {
                         await safeReply(interaction, { embeds: [confirmEmbed] });
 
                         // 3. Specialized Logging
-                        if (isAuction) {
-                            // Dedicated Auction Logs (Bypass Standard Store Logs)
-                            const transChan = await client.channels.fetch(process.env.AUCTION_TRANSACTION_LOG_ID).catch(() => null);
-                            if (transChan) {
-                                const transEmbed = new EmbedBuilder()
-                                    .setTitle('💰  AUCTION TRANSACTION LOG')
-                                    .setColor('#f1c40f')
-                                    .addFields(
-                                        { name: 'Buyer / Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                        { name: 'Product ID', value: `\`${pay.product_id}\``, inline: true },
-                                        { name: 'Final Amount', value: `**${fmt}**`, inline: true },
-                                        { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                        { name: 'Status', value: '🟢 `COMPLETED`', inline: true }
-                                    )
-                                    .setTimestamp();
-                                await transChan.send({ embeds: [transEmbed] }).catch(() => { });
-                            }
-
-                            const deliveryChan = await client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null);
-                            if (deliveryChan) {
-                                const deliveryEmbed = new EmbedBuilder()
-                                    .setTitle('📦  AUCTION DELIVERY LOG')
-                                    .setColor('#f1c40f')
-                                    .addFields(
-                                        { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                        { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                        { name: 'Status', value: '📦 `Check your DM for product delivery`', inline: false }
-                                    )
-                                    .setTimestamp();
-                                await deliveryChan.send({ embeds: [deliveryEmbed] }).catch(() => { });
-                            }
-                        } else {
-                            // Standard Store Logs
-                            const histChan = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
-                            if (histChan) {
-                                const histEmbed = new EmbedBuilder().setTitle('Order Completed').addFields(
-                                    { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                    { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
-                                    { name: 'Product', value: pay.product_id, inline: true },
-                                    { name: 'Total', value: fmt, inline: true },
-                                    { name: 'Process', value: 'Automatic', inline: true }
-                                ).setTimestamp();
-                                await histChan.send({ embeds: [histEmbed] }).catch(() => { });
-                            }
-
-                            const payChan = await client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null);
-                            if (payChan) {
-                                const payEmbed = new EmbedBuilder().setTitle('Payment Received').addFields(
-                                    { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                    { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
-                                    { name: 'Total', value: fmt, inline: true },
-                                    { name: 'Status', value: 'Completed', inline: true }
-                                ).setTimestamp();
-                                await payChan.send({ embeds: [payEmbed] }).catch(() => { });
-                            }
-                        }
+                        // 3. Fire-and-forget logging (don't block the user response)
+                        setImmediate(async () => {
+                            try {
+                                if (isAuction) {
+                                    const [transChan, deliveryChan] = await Promise.all([
+                                        client.channels.fetch(process.env.AUCTION_TRANSACTION_LOG_ID).catch(() => null),
+                                        client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null)
+                                    ]);
+                                    if (transChan) transChan.send({
+                                        embeds: [new EmbedBuilder().setTitle('💰  AUCTION TRANSACTION LOG').setColor('#f1c40f').addFields(
+                                            { name: 'Buyer / Winner', value: `<@${interaction.user.id}>`, inline: true },
+                                            { name: 'Product ID', value: `\`${pay.product_id}\``, inline: true },
+                                            { name: 'Final Amount', value: `**${fmt}**`, inline: true },
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: true },
+                                            { name: 'Status', value: '🟢 `COMPLETED`', inline: true }
+                                        ).setTimestamp()]
+                                    }).catch(() => { });
+                                    if (deliveryChan) deliveryChan.send({
+                                        embeds: [new EmbedBuilder().setTitle('📦  AUCTION DELIVERY LOG').setColor('#f1c40f').addFields(
+                                            { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: true },
+                                            { name: 'Status', value: '📦 `Check your DM for product delivery`', inline: false }
+                                        ).setTimestamp()]
+                                    }).catch(() => { });
+                                } else {
+                                    const [histChan, payChan] = await Promise.all([
+                                        client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null),
+                                        client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null)
+                                    ]);
+                                    if (histChan) histChan.send({
+                                        embeds: [new EmbedBuilder().setTitle('Order Completed').addFields(
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                            { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                            { name: 'Product', value: pay.product_id, inline: true },
+                                            { name: 'Total', value: fmt, inline: true },
+                                            { name: 'Process', value: 'Automatic', inline: true }
+                                        ).setTimestamp()]
+                                    }).catch(() => { });
+                                    if (payChan) payChan.send({
+                                        embeds: [new EmbedBuilder().setTitle('Payment Received').addFields(
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                            { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                            { name: 'Total', value: fmt, inline: true },
+                                            { name: 'Status', value: 'Completed', inline: true }
+                                        ).setTimestamp()]
+                                    }).catch(() => { });
+                                }
+                            } catch (logErr) { console.warn('[LOG] Fire-and-forget logging error:', logErr.message); }
+                        });
 
                         // 4. Post-Fulfillment (Role & Dashboard)
                         const customerRoleId = process.env.COSTUMER_ROLE_ID;
@@ -2264,6 +2269,7 @@ client.once('clientReady', async () => {
         checkAuctionDeadlines();
         checkAuctionSettlements();
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
+        await refreshBanCache(); // Load banned users into memory for 0ms lookups
 
         // Refresh database monitor embeds on startup (Live Stock Only)
         const { data: allProducts } = await supabase.from('products').select('*');
@@ -2294,6 +2300,7 @@ client.once('clientReady', async () => {
                     checkAuctionDeadlines();
                     checkAuctionSettlements();
                     updateHoneypotWarning();
+                    refreshBanCache().catch(() => { }); // Keep ban cache in sync
                 } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
             }, interval);
         }, 15000);
