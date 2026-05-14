@@ -847,7 +847,7 @@ client.on('interactionCreate', async interaction => {
                         .setPlaceholder('Auction Management...')
                         .addOptions([
                             { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
-                            { label: 'Add Stock Data', description: 'Quickly add products to stock', value: 'opt_add_auction_stock', emoji: '📦' },
+                            { label: 'Add Category', description: 'Create a new product category for auction', value: 'opt_add_category', emoji: '🏷️' },
                             { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
                         ]);
 
