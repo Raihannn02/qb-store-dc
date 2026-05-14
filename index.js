@@ -93,13 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.7',
-    codename: 'Zero Conflict',
+    version: '3.0.8',
+    codename: 'Modal Harmony',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Interaction: Resolved "InteractionAlreadyReplied" across all modules.' },
-        { type: 'SYS', desc: 'Stability: Unified response engine with automatic state detection.' },
-        { type: 'FIX', desc: 'Interaction: Absolute immunity to 10062 and race conditions.' }
+        { type: 'FIX', desc: 'Modal: Resolved "AlreadyReplied" for all Auction & Admin modals.' },
+        { type: 'SYS', desc: 'Stability: Refined global deferral exclusion for modal-triggering interactions.' },
+        { type: 'FIX', desc: 'Interaction: Zero Conflict engine (v3.0.7) fully integrated with Modal safety.' }
     ]
 };
 
@@ -1001,9 +1001,10 @@ client.on('interactionCreate', async interaction => {
 
         // ── 1. IMMEDIATE DEFERRAL (Secure the 3s window) ──
         // Only defer if it's NOT a Modal Trigger (you can't showModal after deferring)
-        const modalIDs = ['btn_open_bid', 'btn_stock_mgmt_add', 'mod_db_add_', 'btn_db_add_'];
-        const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config'];
-        const isModalTrigger = modalIDs.some(id => interaction.customId?.startsWith(id)) ||
+        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick'];
+        const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
+
+        const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
             (interaction.isStringSelectMenu() && selectModalOptions.includes(interaction.values[0]));
 
         if (interaction.isRepliable() && !isModalTrigger && !interaction.isModalSubmit()) {
@@ -1151,8 +1152,7 @@ client.on('interactionCreate', async interaction => {
                         .setStyle(TextInputStyle.Paragraph)
                         .setRequired(true)
                 ));
-                try { return await safeModal(interaction, modal); }
-                catch (e) { return; }
+                await safeModal(interaction, modal);
             }
 
             // ── btn_db_edit_pick_ ─────────────────────────────
@@ -1517,8 +1517,7 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('New Format').setValue(p.format).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('New Description').setValue(p.description || '-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                 );
-                try { return await interaction.showModal(modal); }
-                catch (e) { console.error('[MODAL] sel_p_edit_pick showModal failed:', e.message); return; }
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_p_del_pick ────────────────────────────────
@@ -1563,8 +1562,7 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('q').setLabel('Quantity').setPlaceholder('e.g. 1').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                try { return await interaction.showModal(modal); }
-                catch (e) { console.error('[MODAL] sel_buy showModal failed:', e.message); return; }
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_db_edit_ ──────────────────────────────────
@@ -1577,8 +1575,7 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('data').setLabel('New Content').setValue(s.content).setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                try { return await interaction.showModal(modal); }
-                catch (e) { console.error('[MODAL] sel_db_edit showModal failed:', e.message); return; }
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_db_del_ ───────────────────────────────────
@@ -1611,11 +1608,7 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true))
                     );
-                    try { return await interaction.showModal(modal); }
-                    catch (e) {
-                        console.error('[MODAL] opt_add_auction failed:', e.message);
-                        return;
-                    }
+                    return await safeModal(interaction, modal);
                 }
 
                 if (choice === 'opt_add_category') {
@@ -1626,15 +1619,7 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Gaming').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true))
                     );
-                    try { return await interaction.showModal(modal); }
-                    catch (e) {
-                        if (e.code === 10062 || String(e.message).includes('Unknown interaction')) {
-                            console.warn('[MODAL] Token expired for opt_add_category (select menu dropped). User must reload the settings menu.');
-                        } else {
-                            console.error('[MODAL] opt_add_category failed:', e.message);
-                        }
-                        return;
-                    }
+                    return await safeModal(interaction, modal);
                 }
 
                 if (choice === 'opt_toggle_auction') {
@@ -1677,9 +1662,7 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Confirmed Product ID').setValue(pid).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2...').setStyle(TextInputStyle.Paragraph).setRequired(true))
                 );
-                try { return await interaction.showModal(modal); }
-                catch (e) { console.error('[MODAL] sel_stock_add_pick failed:', e.message); }
-                return;
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_stock_edit_pick ──────────────────────────
@@ -1699,7 +1682,7 @@ client.on('interactionCreate', async interaction => {
                 const pid = interaction.values[0];
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return interaction.editReply({ content: '❌ No stock entries to delete.' });
+                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete.' });
 
                 const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select an entry to delete...');
                 stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
@@ -1728,7 +1711,7 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'sel_auction_edit_pick') {
                 const pid = interaction.values[0];
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p) return interaction.reply({ content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
+                if (!p) return safeReply(interaction, { content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
 
                 const modal = new ModalBuilder().setCustomId(`mod_auction_edit_${pid}`).setTitle('✏️ Edit Product');
                 modal.addComponents(
@@ -1736,8 +1719,7 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setValue(p.category_name || '').setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true))
                 );
-                try { return await interaction.showModal(modal); }
-                catch (e) { console.error('[MODAL] sel_auction_edit_pick failed:', e.message); return; }
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_auction_delete_pick ────────────────────────
