@@ -41,6 +41,14 @@ async function migrate() {
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS bid_increment BIGINT DEFAULT 5000;');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS product_id TEXT;');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS category_name TEXT;');
+        console.log('\n-- Create auction_bids table for history');
+        console.log('CREATE TABLE IF NOT EXISTS auction_bids (');
+        console.log('  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,');
+        console.log('  auction_id UUID REFERENCES auctions(id) ON DELETE CASCADE,');
+        console.log('  user_id TEXT NOT NULL,');
+        console.log('  amount BIGINT NOT NULL,');
+        console.log('  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+        console.log(');');
         console.log('\n⚠️ VERY IMPORTANT: After running the query, go to Supabase Settings -> API -> Tables & Views -> and click "Reload Schema Cache"!');
     }
 
