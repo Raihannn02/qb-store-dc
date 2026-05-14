@@ -132,35 +132,44 @@ async function getOrCreateDashboardMessage(channel, configKey, searchTitles = []
     const config = loadConfig();
     const messageId = config[configKey];
 
-    // 1. Try saved ID
+    // 1. Try saved ID first
     if (messageId) {
         try {
-            return await channel.messages.fetch(messageId);
+            const m = await channel.messages.fetch(messageId);
+            if (m && m.author.id === client.user.id) return m;
         } catch {
             config[configKey] = null;
             saveConfig(config);
         }
     }
 
-    // 2. Search aggressively (100 messages)
-    const msgs = await channel.messages.fetch({ limit: 100 });
-    const matches = msgs.filter(m => {
-        if (m.author.id !== client.user.id) return false;
-        if (criteriaFn) return criteriaFn(m);
-        const title = m.embeds[0]?.title?.toUpperCase() || '';
-        return searchTitles.some(t => title.includes(t.toUpperCase()));
-    });
+    // 2. Deep Search (Limit 100)
+    try {
+        const msgs = await channel.messages.fetch({ limit: 100 });
+        const matches = msgs.filter(m => {
+            if (m.author.id !== client.user.id) return false;
+            if (criteriaFn) return criteriaFn(m);
+            if (!m.embeds || m.embeds.length === 0) return false;
 
-    if (matches.size > 0) {
-        const primary = matches.first();
-        config[configKey] = primary.id;
-        saveConfig(config);
+            const content = (m.embeds[0].title || '') + (m.embeds[0].description || '') + (m.embeds[0].footer?.text || '');
+            const upperContent = content.toUpperCase();
+            return searchTitles.some(t => upperContent.includes(t.toUpperCase()));
+        });
 
-        // CLEANUP: Delete all duplicates
-        for (const [id, msg] of matches) {
-            if (id !== primary.id) await msg.delete().catch(() => { });
+        if (matches.size > 0) {
+            const primary = matches.first();
+            config[configKey] = primary.id;
+            saveConfig(config);
+            console.log(`[SYNC] Re-linked ${configKey} to existing message: ${primary.id}`);
+
+            // Cleanup duplicates
+            for (const [id, msg] of matches) {
+                if (id !== primary.id) await msg.delete().catch(() => { });
+            }
+            return primary;
         }
-        return primary;
+    } catch (e) {
+        console.error(`[SYNC] Search failed for ${configKey}:`, e.message);
     }
 
     return null;
@@ -638,59 +647,45 @@ client.on('guildMemberRemove', async member => {
 // ─────────────────────────────────────────────────────────────
 
 async function updateHoneypotWarning() {
-    const channelId = process.env.HONEYPOT_CHANNEL_ID;
-    if (!channelId) return;
+    await withLock('honeypot', async () => {
+        const channelId = process.env.HONEYPOT_CHANNEL_ID;
+        if (!channelId) return;
 
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) return;
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel) return;
 
-    const config = loadConfig();
-    const bannedCount = config.honeypotBans || 0;
+        const config = loadConfig();
+        const bannedCount = config.honeypotBans || 0;
 
-    const embed = new EmbedBuilder()
-        .setTitle('⛔ Honeypot Protection Active')
-        .setColor('#d63031')
-        .setDescription(
-            "“Don't send any message here,\n" +
-            "Unless you want to get banned ⛔”\n\n" +
-            "**System Explanation:**\n" +
-            "This channel is used as a security countermeasure (Honeypot) to automatically detect and ban users or automated scripts spreading phishing links, malware, or hacked Discord accounts.\n\n" +
-            "By sending a message here, you are flagged as a malicious actor and will be **permanently banned** from this server immediately."
-        )
-        .addFields(
-            { name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
-            { name: '🛡️ Total User Banned', value: `\`${bannedCount}\``, inline: true }
-        )
-        .setFooter({ text: 'System Security Enforcement' })
-        .setTimestamp();
+        const embed = new EmbedBuilder()
+            .setTitle('⛔ Honeypot Protection Active')
+            .setColor('#d63031')
+            .setDescription(
+                "“Don't send any message here,\n" +
+                "Unless you want to get banned ⛔”\n\n" +
+                "**System Explanation:**\n" +
+                "This channel is used as a security countermeasure (Honeypot) to automatically detect and ban users or automated scripts spreading phishing links, malware, or hacked Discord accounts.\n\n" +
+                "By sending a message here, you are flagged as a malicious actor and will be **permanently banned** from this server immediately."
+            )
+            .addFields(
+                { name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
+                { name: '🛡️ Total User Banned', value: `\`${bannedCount}\``, inline: true }
+            )
+            .setFooter({ text: 'System Security Enforcement' })
+            .setTimestamp();
 
-    try {
-        const messages = await channel.messages.fetch({ limit: 50 });
-        const matches = messages.filter(m =>
-            m.author.id === client.user.id &&
-            m.embeds[0]?.title?.includes('Honeypot Protection')
-        );
-
-        if (matches.length > 0) {
-            const botMsg = matches.first();
-            await botMsg.edit({ embeds: [embed] });
-            console.log('[HONEYPOT] Warning embed edited.');
-
-            // CLEANUP: Delete other honeypot warning duplicates
-            for (const [id, msg] of matches) {
-                if (id !== botMsg.id) await msg.delete().catch(() => { });
-            }
+        const msg = await getOrCreateDashboardMessage(channel, 'honeypotMessageId', ['Honeypot Protection']);
+        if (msg) {
+            await msg.edit({ embeds: [embed] });
         } else {
-            // Delete all other messages in honeypot channel to keep it clean
-            for (const [, msg] of messages) {
-                await msg.delete().catch(() => { });
-            }
-            await channel.send({ embeds: [embed] });
-            console.log('[HONEYPOT] New warning embed sent.');
+            // Only search & delete ALL others if none recognized
+            const messages = await channel.messages.fetch({ limit: 100 });
+            for (const [, m] of messages) await m.delete().catch(() => { });
+            const nMsg = await channel.send({ embeds: [embed] });
+            config.honeypotMessageId = nMsg.id;
+            saveConfig(config);
         }
-    } catch (err) {
-        console.error(`[HONEYPOT] Failed to update warning: ${err.message}`);
-    }
+    });
 }
 
 client.on('messageCreate', async message => {
