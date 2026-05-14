@@ -93,15 +93,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.1',
-    codename: 'Elite UI Premium',
+    version: '3.0.2',
+    codename: 'Resilient Elite',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Auction UI: Elite Dashboard redesign with structured layout.' },
-        { type: 'NEW', desc: 'Auction UI: Refined bid history (Top 1 + 10 Bidders) display.' },
-        { type: 'SYS', desc: 'Resiliency: Implemented auto-retry for Discord API connection timeouts.' },
-        { type: 'SYS', desc: 'Resiliency: Optimized interaction handling with immediate response deferral.' },
-        { type: 'FIX', desc: 'Live Stock: Enforced strict separation from Auction products.' }
+        { type: 'FIX', desc: 'Auction: Fixed stock lookup bug (using actual product_id for fulfillment).' },
+        { type: 'SYS', desc: 'Stability: Enhanced interaction handling for modals and deferrals.' },
+        { type: 'UI', desc: 'Elite UI: Cleaned footers (timestamp only) for minimal look.' },
+        { type: 'FIX', desc: 'Auction: Optimized zero-latency mod_open_bid trigger.' }
     ]
 };
 
@@ -570,7 +569,6 @@ async function endAuction(aid) {
                 .setTitle('🏆  AUCTION CONCLUDED')
                 .setColor('#f1c40f')
                 .setDescription(`>>> The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has been notified via DM to finalize the transaction.*`)
-                .setFooter({ text: 'Elite Auction Resolution System' })
                 .setTimestamp();
             await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
         }
@@ -588,7 +586,7 @@ async function endAuction(aid) {
                 await supabase.from('pending_payments').insert([{
                     invoice_id: orderId,
                     user_id: winnerId,
-                    product_id: `AUCTION: ${auction.name}`,
+                    product_id: auction.product_id, // Use actual ID for fulfillment lookup
                     qty: 1,
                     amount: finalAmount,
                     created_at: new Date().toISOString()
@@ -606,7 +604,7 @@ async function endAuction(aid) {
                             { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
-                        .setFooter({ text: 'Elite Auction Redemption Portal' }).setTimestamp();
+                        .setTimestamp();
 
                     const btn = new ActionRowBuilder().addComponents(
                         new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
@@ -960,7 +958,7 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_register ──────────────────────────────────
             if (interaction.customId === 'btn_register') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                try { await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); } catch (e) { if (e.code === 10062) return; }
 
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
                 if (user) return interaction.editReply({ content: '⚠️ You are already registered!' });
@@ -973,7 +971,7 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_auction_register ──────────────────────────
             if (interaction.customId === 'btn_auction_register') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                try { await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); } catch (e) { if (e.code === 10062) return; }
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
                 if (user) return interaction.editReply({ content: '⚠️ You are already registered!' });
                 const { error: insertErr } = await supabase.from('users').insert([{ id: interaction.user.id }]);
@@ -990,9 +988,12 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                return interaction.showModal(modal).catch(e => {
-                    console.error('[MODAL] showModal Error (Token probably expired):', e.message);
-                });
+                try {
+                    return await interaction.showModal(modal);
+                } catch (e) {
+                    if (e.code === 10062) return; // Interaction already handled/expired
+                    console.error('[MODAL] btn_open_bid showModal Error:', e.message);
+                }
             }
 
             // ── btn_auction_settings ──────────────────────────
@@ -1123,7 +1124,7 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_check_pay_ ────────────────────────────────
             if (interaction.customId.startsWith('btn_check_pay_')) {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                try { await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }); } catch (e) { if (e.code === 10062) return; }
                 const orderId = interaction.customId.replace('btn_check_pay_', '');
 
                 const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
@@ -1177,7 +1178,7 @@ client.on('interactionCreate', async interaction => {
                         } else {
                             buyerEmbed.addFields({ name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false });
                         }
-                        buyerEmbed.setFooter({ text: `QUANTUMBLOX ${isAuction ? 'AUCTION' : 'STORE'} — Thank you!` });
+                        buyerEmbed.setTimestamp();
 
                         await interaction.user.send({ embeds: [buyerEmbed] }).catch(() => { });
 
@@ -1210,7 +1211,6 @@ client.on('interactionCreate', async interaction => {
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: true },
                                         { name: 'Status', value: '🟢 `COMPLETED`', inline: true }
                                     )
-                                    .setFooter({ text: 'Elite Auction Transaction System' })
                                     .setTimestamp();
                                 await transChan.send({ embeds: [transEmbed] }).catch(() => { });
                             }
@@ -1225,7 +1225,6 @@ client.on('interactionCreate', async interaction => {
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: true },
                                         { name: 'Stock Delivered', value: `\`\`\`\n${deliver.join('\n')}\n\`\`\``, inline: false }
                                     )
-                                    .setFooter({ text: 'Elite Auction Delivery Module' })
                                     .setTimestamp();
                                 await deliveryChan.send({ embeds: [deliveryEmbed] }).catch(() => { });
                             }
