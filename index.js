@@ -88,14 +88,15 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.6.0',
-    codename: 'Auction Master',
+    version: '2.7.0',
+    codename: 'Auction Pro',
     date: '2026-05-14',
     changelog: [
-        { type: 'NEW', desc: 'Auction System: Real-time dashboard & anti-fake bid' },
-        { type: 'NEW', desc: 'Auction: Integrated with Pakasir payment gateway' },
-        { type: 'NEW', desc: 'Auction Admin: Management tools & manual end control' },
-        { type: 'FIX', desc: 'Stability: Refines interaction handling for complex system' },
+        { type: 'NEW', desc: 'Auction v2: Multi-channel Winner Notifications & Auto-Delivery' },
+        { type: 'NEW', desc: 'Auction v2: Bid Increment Configuration & Enforcement' },
+        { type: 'NEW', desc: 'Auction v2: 24h Non-payment Auto-Ban Worker' },
+        { type: 'FIX', desc: 'UI: Polished Auction Dashboard with ⚖️ layout' },
+        { type: 'FIX', desc: 'Stability: Embed character limit protection (Version Dashboard)' },
         { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
         { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
         { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
@@ -298,8 +299,8 @@ async function updateAuctionDashboard() {
         const { data: auction, error } = await supabase.from('auctions').select('*').eq('status', 'active').single();
 
         const embed = new EmbedBuilder()
-            .setTitle('🔨  AUCTION SYSTEM DASHBOARD')
-            .setColor('#f1c40f')
+            .setTitle('⚖️  AUCTION SYSTEM DASHBOARD')
+            .setColor('#2b2d31')
             .setTimestamp();
 
         if (error || !auction) {
@@ -307,7 +308,17 @@ async function updateAuctionDashboard() {
                 .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
             const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
-            embed.setDescription(`>>> **Product:** \`${auction.name}\`\n**Description:** ${auction.description || '-'}\n\n🏆 **Highest Bid:** \`${formatPrice(auction.current_bid)}\`\n👤 **Highest Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '`None`'}\n⏳ **Ends:** <t:${unixEnd}:R> (<t:${unixEnd}:F>)`)
+            embed.setDescription(
+                `**Product:** \`${auction.name}\`\n` +
+                `**Description:** ${auction.description || '-'}\n\n` +
+                `🏆 **Highest Bid:** \`${formatPrice(auction.current_bid)}\`\n` +
+                `👤 **Highest Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '`None`'}\n` +
+                `⏳ **Ends:** <t:${unixEnd}:R>\n\n` +
+                `📢 **Rules & Warnings:**\n` +
+                `• Min. Increment: \`${formatPrice(auction.bid_increment)}\`\n` +
+                `• **Anti-Fake Bid:** Troll bids will be automatically BANNED.\n` +
+                `• **Payment:** Winner must pay within 24 hours or face permanent BAN.`
+            )
                 .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         }
 
@@ -341,6 +352,61 @@ async function updateAuctionDashboard() {
         }
     } catch (e) {
         console.error('Auction Dashboard Update Error:', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// checkAuctionDeadlines
+// ─────────────────────────────────────────────────────────────
+
+async function checkAuctionDeadlines() {
+    try {
+        const { data: expired } = await supabase.from('pending_payments')
+            .select('*')
+            .filter('invoice_id', 'ilike', 'AUC%')
+            .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+
+        if (!expired || expired.length === 0) return;
+
+        for (const pay of expired) {
+            console.log(`[DEADLINE] Banning user ${pay.user_id} for non-payment of auction ${pay.invoice_id}`);
+
+            try {
+                const guild = client.guilds.cache.first(); // Assuming single guild bot
+                if (!guild) continue;
+
+                const member = await guild.members.fetch(pay.user_id).catch(() => null);
+                const reason = `Automatic Banned: Non-payment of auction winning (>24h). ID: ${pay.invoice_id}`;
+
+                if (member) {
+                    await member.ban({ reason }).catch(e => console.error(`[DEADLINE] Ban failed: ${e.message}`));
+                } else {
+                    await guild.bans.create(pay.user_id, { reason }).catch(e => console.error(`[DEADLINE] Global ban failed: ${e.message}`));
+                }
+
+                // Log to specific channel
+                const banLogChan = await client.channels.fetch(process.env.AUCTION_EXPIRED_BAN_LOG_ID).catch(() => null);
+                if (banLogChan) {
+                    const embed = new EmbedBuilder()
+                        .setTitle('⛔ Winner Banned (Non-payment)')
+                        .setColor('#ff4757')
+                        .addFields(
+                            { name: 'User', value: `<@${pay.user_id}> (\`${pay.user_id}\`)`, inline: true },
+                            { name: 'Invoice', value: `\`${pay.invoice_id}\``, inline: true },
+                            { name: 'Wait Time', value: '24 Hours', inline: true }
+                        )
+                        .setTimestamp();
+                    await banLogChan.send({ embeds: [embed] }).catch(() => { });
+                }
+
+                // Cleanup
+                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+            } catch (inner) {
+                console.error(`[DEADLINE] Error processing penalty for ${pay.user_id}:`, inner.message);
+            }
+        }
+    } catch (e) {
+        console.error('[DEADLINE] Worker Error:', e);
     }
 }
 
@@ -816,11 +882,14 @@ client.on('interactionCreate', async interaction => {
 
                         const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
 
+                        // specialized logging for auctions
+                        const isAuction = pay.product_id.startsWith('AUCTION:');
+
                         // DM buyer with items
                         await interaction.user.send({
                             embeds: [new EmbedBuilder()
-                                .setTitle('✅  Order Confirmed').setColor('#00b894')
-                                .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
+                                .setTitle(isAuction ? '🏆  Auction Item Delivered' : '✅  Order Confirmed').setColor('#00b894')
+                                .setDescription(isAuction ? `Congratulations on winning the auction! Here is your item for **${pay.product_id.replace('AUCTION: ', '')}**.` : 'Your order has been processed successfully. Please keep this receipt for your records.')
                                 .addFields(
                                     { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                     { name: 'Product', value: pay.product_id, inline: true },
@@ -828,9 +897,43 @@ client.on('interactionCreate', async interaction => {
                                     { name: 'Total Paid', value: fmt, inline: true },
                                     { name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
                                 )
-                                .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' }).setTimestamp()
+                                .setFooter({ text: `QUANTUMBLOX ${isAuction ? 'AUCTION' : 'STORE'} — Thank you!` }).setTimestamp()
                             ]
                         }).catch(() => { });
+
+                        // Auction Specialized Logs
+                        if (isAuction) {
+                            // Transaction Log
+                            const transLogChan = await client.channels.fetch(process.env.AUCTION_TRANSACTION_LOG_ID).catch(() => null);
+                            if (transLogChan) {
+                                const embed = new EmbedBuilder()
+                                    .setTitle('💰 Auction Payment Received')
+                                    .setColor('#00d2d3')
+                                    .addFields(
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Winner', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+                                        { name: 'Auction', value: pay.product_id.replace('AUCTION: ', ''), inline: true },
+                                        { name: 'Amount Paid', value: fmt, inline: true }
+                                    )
+                                    .setTimestamp();
+                                await transLogChan.send({ embeds: [embed] }).catch(() => { });
+                            }
+
+                            // Delivery Log
+                            const deliveryLogChan = await client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null);
+                            if (deliveryLogChan) {
+                                const embed = new EmbedBuilder()
+                                    .setTitle('📦 Auction Item Delivered')
+                                    .setColor('#54a0ff')
+                                    .addFields(
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                                        { name: 'Receiver', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Items', value: `\`${deliver.length} items delivered\``, inline: true }
+                                    )
+                                    .setTimestamp();
+                                await deliveryLogChan.send({ embeds: [embed] }).catch(() => { });
+                            }
+                        }
 
                         // Ephemeral reply (no items)
                         await interaction.editReply({
@@ -1119,11 +1222,13 @@ client.on('interactionCreate', async interaction => {
                 const choice = interaction.values[0];
 
                 if (choice === 'opt_add_auction') {
-                    const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('🔨 Add Auction Product');
+                    const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('⚖️ Create Auction');
                     modal.addComponents(
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Steam Account High Level').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Base Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Optional)').setPlaceholder('e.g. 1499...').setStyle(TextInputStyle.Short).setRequired(false)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
                     );
                     try { return await interaction.showModal(modal); }
@@ -1158,6 +1263,17 @@ client.on('interactionCreate', async interaction => {
                     const finalAmount = auction.current_bid;
                     const orderId = `AUC${Date.now()}`;
 
+                    // Public Winner Notification
+                    const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
+                    if (winChan) {
+                        const winEmbed = new EmbedBuilder()
+                            .setTitle('🏆 AUCTION WINNER!')
+                            .setColor('#f1c40f')
+                            .setDescription(`The auction for **${auction.name}** has ended!\n\n👑 **Winner:** <@${winnerId}>\n💰 **Winning Bid:** \`${formatPrice(finalAmount)}\`\n\n*Please check your DMs for payment instructions.*`)
+                            .setTimestamp();
+                        await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
+                    }
+
                     // Create Pakasir transaction
                     try {
                         const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
@@ -1171,7 +1287,7 @@ client.on('interactionCreate', async interaction => {
                             await supabase.from('pending_payments').insert([{
                                 invoice_id: orderId,
                                 user_id: winnerId,
-                                product_id: `AUCTION: ${auction.name}`,
+                                product_id: auction.product_id || `AUCTION: ${auction.name}`,
                                 qty: 1,
                                 amount: finalAmount,
                                 created_at: new Date().toISOString()
@@ -1499,13 +1615,16 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'mod_auction_add') {
                 const name = interaction.fields.getTextInputValue('name');
                 const basePriceStr = interaction.fields.getTextInputValue('base_price');
+                const incStr = interaction.fields.getTextInputValue('increment');
                 const duration = parseInt(interaction.fields.getTextInputValue('duration'));
+                const linkedPid = interaction.fields.getTextInputValue('pid') || null;
                 const desc = interaction.fields.getTextInputValue('desc') || '-';
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
-                if (isNaN(basePrice) || isNaN(duration)) return interaction.editReply({ content: '❌ Invalid price or duration format.' });
+                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
+                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return interaction.editReply({ content: '❌ Invalid price, increment, or duration format.' });
 
                 const endTime = new Date(Date.now() + duration * 60000).toISOString();
 
@@ -1514,6 +1633,8 @@ client.on('interactionCreate', async interaction => {
                     description: desc,
                     base_price: basePrice,
                     current_bid: basePrice,
+                    bid_increment: increment,
+                    product_id: linkedPid,
                     status: 'pending',
                     end_time: endTime
                 }]);
@@ -1562,8 +1683,15 @@ client.on('interactionCreate', async interaction => {
                 const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
                 if (!auction) return interaction.editReply({ content: '❌ No active auction found.' });
 
-                if (bidAmt <= auction.current_bid) {
-                    return interaction.editReply({ content: `❌ Your bid must be higher than the current bid: **${formatPrice(auction.current_bid)}**` });
+                const minNextBid = auction.current_bid + (auction.bid_increment || 5000);
+                if (bidAmt < minNextBid) {
+                    return interaction.editReply({ content: `❌ Your bid must be at least **${formatPrice(minNextBid)}** (Min. Increment: ${formatPrice(auction.bid_increment)})` });
+                }
+
+                // Check if bid is a valid increment multiple
+                const diff = bidAmt - auction.base_price;
+                if (diff % (auction.bid_increment || 5000) !== 0) {
+                    return interaction.editReply({ content: `❌ Bid must be a multiple of the increment: **${formatPrice(auction.bid_increment)}** starting from **${formatPrice(auction.base_price)}**.` });
                 }
 
                 // Update auction with new highest bid
@@ -1614,6 +1742,7 @@ client.once('clientReady', async () => {
     updateDashboard();
     updateVersionDashboard();
     updateAuctionDashboard();
+    checkAuctionDeadlines();
     updateHoneypotWarning();
 
     // Refresh database monitor embeds on startup
@@ -1631,6 +1760,7 @@ client.once('clientReady', async () => {
         updateDashboard();
         updateVersionDashboard();
         updateAuctionDashboard();
+        checkAuctionDeadlines();
         updateHoneypotWarning();
     }, interval);
 });
