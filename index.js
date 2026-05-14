@@ -93,10 +93,11 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.1',
+    version: '2.9.2',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Discord UI: Resolved duplicate Database Monitor embeds in Stock channel.' },
         { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
         { type: 'NEW', desc: 'Administrative: Delete Auction Categories with Safety UI.' },
         { type: 'NEW', desc: 'Auction Utility: Manual Product ID assignment.' },
@@ -251,7 +252,8 @@ async function updateDatabaseEmbed(productId) {
 
     const config = loadConfig();
     const isAuction = isAuctionProduct(product);
-    const dbChannelId = isAuction ? process.env.STOCK_MANAGEMENT_CHANNEL_ID : (process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId);
+    // Removed STOCK_MANAGEMENT_CHANNEL_ID to prevent duplication with the Stock Management System embed.
+    const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
 
     if (!dbChannelId) { console.warn(`[DB EMBED] Channel ID not set for product: ${productId}`); return; }
 
