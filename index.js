@@ -308,16 +308,26 @@ async function updateDashboard() {
             }
         }
 
-        const msgs = await channel.messages.fetch({ limit: 20 });
+        const msgs = await channel.messages.fetch({ limit: 50 });
         const targetTitle = (config.embed?.title || 'Shop Dashboard').toUpperCase();
-        const botMsg = msgs.find(m =>
+        const matches = msgs.filter(m =>
             m.author.id === client.user.id &&
             m.embeds[0]?.title?.toUpperCase().includes(targetTitle)
         );
-        if (botMsg) {
+
+        if (matches.length > 0) {
+            const botMsg = matches.first();
             await botMsg.edit({ embeds: [embed], components: [row] });
             config.dashboardMessageId = botMsg.id;
             saveConfig(config);
+
+            // AUTO-CLEANUP: Delete all other duplicates
+            for (const [id, msg] of matches) {
+                if (id !== botMsg.id) {
+                    await msg.delete().catch(() => { });
+                    console.log(`[CLEANUP] Deleted duplicate dashboard: ${id}`);
+                }
+            }
         } else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
             config.dashboardMessageId = nMsg.id;
@@ -1312,9 +1322,13 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'sel_p_del_pick') {
                 const pid = interaction.values[0];
                 await interaction.deferUpdate();
-                await supabase.from('products').delete().eq('id', pid);
+                const { error } = await supabase.from('products').delete().eq('id', pid);
+                if (error) return interaction.editReply({ content: `❌ Failed to delete product: ${error.message}`, components: [] });
+
                 await interaction.editReply({ content: `✅ Product \`${pid}\` has been permanently deleted.`, components: [] });
-                updateDashboard();
+
+                // Small delay to ensure DB sync before dashboard update
+                setTimeout(() => updateDashboard(), 1500);
                 return;
             }
 
