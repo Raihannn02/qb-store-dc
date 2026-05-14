@@ -93,16 +93,16 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.0',
-    codename: 'Stellar Stability+',
+    version: '2.9.1',
+    codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Manual Product ID field for Auction Categories.' },
-        { type: 'FIX', desc: 'Enforced 45-char limit on Modal Titles (SafeTitle).' },
-        { type: 'FIX', desc: 'Preemptive cleanup for Database Monitor duplicates.' },
-        { type: 'FIX', desc: 'Resolved foreign key constraints during product deletion.' },
-        { type: 'FIX', desc: 'Network resilience with withRetry for all API calls.' },
-        { type: 'SYS', desc: 'Memory-based configuration caching and lock systems.' }
+        { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
+        { type: 'NEW', desc: 'Administrative: Delete Auction Categories with Safety UI.' },
+        { type: 'NEW', desc: 'Auction Utility: Manual Product ID assignment.' },
+        { type: 'FIX', desc: 'Discord UI: Enforced 45-char limit on Modal Titles.' },
+        { type: 'FIX', desc: 'Database: Preemptive cleanup for FK constraints.' },
+        { type: 'SYS', desc: 'Stability: Sequential startup and memory caching.' }
     ]
 };
 
@@ -885,7 +885,9 @@ client.on('interactionCreate', async interaction => {
                         .setPlaceholder('Auction Management...')
                         .addOptions([
                             { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
-                            { label: 'Add Category', description: 'Create a new product category for auction', value: 'opt_add_category', emoji: '🏷️' },
+                            { label: 'Add Category', description: 'Create a new product category', value: 'opt_add_category', emoji: '🏷️' },
+                            { label: 'Edit Category', description: 'Modify an existing category', value: 'opt_edit_category', emoji: '✏️' },
+                            { label: 'Delete Category', description: 'Permanently remove a category', value: 'opt_delete_category', emoji: '🗑️' },
                             { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
                         ]);
 
@@ -1415,6 +1417,26 @@ client.on('interactionCreate', async interaction => {
                     auctions.forEach(a => menu.addOptions({ label: `${a.name} (${a.status})`, description: `Base: ${a.base_price}`, value: a.id }));
                     return interaction.editReply({ content: '⚙️ **Auction Manager**\nSelect an auction to toggle its status:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
+
+                if (choice === 'opt_edit_category') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
+                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No auction categories found to edit.' });
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_pick').setPlaceholder('Select a category to edit...');
+                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
+                    return interaction.editReply({ content: '✏️ **Edit Category**\nSelect a category to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
+                }
+
+                if (choice === 'opt_delete_category') {
+                    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                    const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
+                    if (!all || all.length === 0) return interaction.editReply({ content: '❌ No auction categories found to delete.' });
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick').setPlaceholder('Select a category to DELETE...');
+                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Price: ${p.price}`, value: p.id }));
+                    return interaction.editReply({ content: '🗑️ **Delete Category**\nSelect a category to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
+                }
                 return;
             }
 
@@ -1528,6 +1550,35 @@ client.on('interactionCreate', async interaction => {
 
                 await interaction.editReply({ content: `✅ Auction \`${auction.name}\` is now **${newStatus.toUpperCase()}**.`, components: [] });
                 updateAuctionDashboard();
+                return;
+            }
+
+            // ── sel_auction_edit_pick ──────────────────────────
+            if (interaction.customId === 'sel_auction_edit_pick') {
+                const pid = interaction.values[0];
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (!p) return interaction.update({ content: '❌ Category not found.', components: [] });
+
+                const modal = new ModalBuilder().setCustomId(`mod_auction_edit_${pid}`).setTitle(safeTitle('Edit Category', pid));
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('New Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('New Base Price').setValue(p.price).setStyle(TextInputStyle.Short).setRequired(true))
+                );
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] sel_auction_edit_pick failed:', e.message); return; }
+            }
+
+            // ── sel_auction_delete_pick ────────────────────────
+            if (interaction.customId === 'sel_auction_delete_pick') {
+                const pid = interaction.values[0];
+                await interaction.deferUpdate();
+
+                const { error: delErr } = await supabase.from('products').delete().eq('id', pid);
+                if (delErr) return interaction.editReply({ content: `❌ Failed to delete category: ${delErr.message}`, components: [] });
+
+                await interaction.editReply({ content: `✅ Category \`${pid}\` has been permanently deleted.`, components: [] });
+                updateDashboard();
+                updateStockDashboard();
                 return;
             }
             console.warn(`[WARN] Unhandled select menu interaction: ${interaction.customId}`);
@@ -1843,6 +1894,28 @@ client.on('interactionCreate', async interaction => {
                 if (insertErr) return interaction.editReply({ content: `❌ Failed to create category: ${insertErr.message}` });
 
                 await interaction.editReply({ content: `✅ Category **${name}** created successfully with ID: \`${id}\`` });
+                updateDashboard();
+                updateStockDashboard();
+                return;
+            }
+
+            // ── mod_auction_edit_ ─────────────────────────────
+            if (interaction.customId.startsWith('mod_auction_edit_')) {
+                const pid = interaction.customId.replace('mod_auction_edit_', '');
+                const name = interaction.fields.getTextInputValue('name');
+                const priceStr = interaction.fields.getTextInputValue('price');
+                const price = priceStr.replace(/[^0-9]/g, '');
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const { error: updErr } = await supabase.from('products').update({
+                    name,
+                    price: `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`
+                }).eq('id', pid);
+
+                if (updErr) return interaction.editReply({ content: `❌ Failed to update category: ${updErr.message}` });
+
+                await interaction.editReply({ content: `✅ Category **${name}** (ID: \`${pid}\`) updated successfully!` });
                 updateDashboard();
                 updateStockDashboard();
                 return;
