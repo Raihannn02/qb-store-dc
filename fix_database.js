@@ -16,17 +16,18 @@ async function migrate() {
         console.log('ALTER TABLE products ADD COLUMN system_type TEXT DEFAULT \'regular\';');
     }
 
-    console.log('\n🚀 Verifying "auctions" table: "bid_increment" and "product_id" columns...');
-    const { error: aucErr } = await supabase.from('auctions').select('bid_increment, product_id').limit(1);
+    console.log('\n🚀 Verifying "auctions" table: columns and schema cache...');
+    const { error: aucErr } = await supabase.from('auctions').select('bid_increment, product_id, category_name').limit(1);
 
     if (!aucErr) {
-        console.log('✅ "auctions" table columns (bid_increment, product_id) are configured and cached.');
+        console.log('✅ "auctions" table columns (bid_increment, product_id, category_name) are configured and cached.');
     } else {
         console.log('❌ "auctions" table check failed or columns missing.');
         console.log('IMPORTANT: To fix schema cache errors when creating an auction, please run the following SQL in Supabase SQL Editor:\n');
         console.log('CREATE TABLE IF NOT EXISTS auctions (');
         console.log('  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,');
         console.log('  name TEXT NOT NULL,');
+        console.log('  category_name TEXT,');
         console.log('  description TEXT,');
         console.log('  base_price BIGINT NOT NULL,');
         console.log('  current_bid BIGINT NOT NULL,');
@@ -39,6 +40,7 @@ async function migrate() {
         console.log(');');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS bid_increment BIGINT DEFAULT 5000;');
         console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS product_id TEXT;');
+        console.log('ALTER TABLE auctions ADD COLUMN IF NOT EXISTS category_name TEXT;');
         console.log('\n⚠️ VERY IMPORTANT: After running the query, go to Supabase Settings -> API -> Tables & Views -> and click "Reload Schema Cache"!');
     }
 

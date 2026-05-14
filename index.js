@@ -93,10 +93,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.5',
+    version: '2.9.6',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Auction System: Professional UI redesign for Dashboard.' },
+        { type: 'NEW', desc: 'Auction System: Added Category and Description fields.' },
+        { type: 'FIX', desc: 'Stability: Optimized interaction handling to prevent Unknown Interaction errors.' },
         { type: 'SYS', desc: 'Resolved Unknown interaction spam on inactive Modals.' },
         { type: 'FIX', desc: 'Database: Resolved schema cache and product_id verification.' },
         { type: 'NEW', desc: 'Auction UI: Removed Price field from Add Category.' },
@@ -435,24 +438,21 @@ async function updateAuctionDashboard() {
         if (!channel) return;
 
         const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
-        const embed = new EmbedBuilder().setTitle('⚖️  AUCTION SYSTEM DASHBOARD').setColor('#2b2d31').setTimestamp();
+        const embed = new EmbedBuilder().setTitle('⚖️ AUCTION SYSTEM DASHBOARD').setColor('#2b2d31').setTimestamp();
 
         if (!auction) {
-            embed.setDescription('>>> There is no active auction at the moment. Please wait for an admin to start a new auction session.')
-                .addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+            embed.setDescription('>>> No active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
+                .addFields({ name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
             const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
-            embed.setDescription(
-                `**Product:** \`${auction.name}\`\n` +
-                `**Description:** ${auction.description || '-'}\n\n` +
-                `🏆 **Highest Bid:** \`${formatPrice(auction.current_bid)}\`\n` +
-                `👤 **Highest Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '`None`'}\n` +
-                `⏳ **Ends:** <t:${unixEnd}:R>\n\n` +
-                `📢 **Rules & Warnings:**\n` +
-                `• Min. Increment: \`${formatPrice(auction.bid_increment)}\`\n` +
-                `• **Anti-Fake Bid:** Troll bids will be automatically BANNED.\n` +
-                `• **Payment:** Winner must pay within 24 hours or face permanent BAN.`
-            ).addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
+            embed.setFields(
+                { name: 'Product Name', value: `\`${auction.name}\``, inline: true },
+                { name: 'Category', value: `\`${auction.category_name || 'Digital'}\``, inline: true },
+                { name: 'Description', value: `${auction.description || '-'}`, inline: false },
+                { name: 'Current Standing', value: `🏆 Highest Bid: **${formatPrice(auction.current_bid)}**\n👤 Bidder: ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n⏳ Ends: <t:${unixEnd}:R>`, inline: false },
+                { name: 'Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic BAN.\n• Settlement: Winner must finalize payment within 24 hours.`, inline: false },
+                { name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+            );
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -886,17 +886,18 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_open_bid ──────────────────────────────────
             if (interaction.customId === 'btn_open_bid') {
-                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (!user) return interaction.reply({ content: '❌ Please register first by clicking the **Register** button.', flags: [MessageFlags.Ephemeral] });
-
-                const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+                // Optimization: Show modal FIRST to avoid interaction timeout while checking DB
+                const { data: auction } = await supabase.from('auctions').select('name').eq('status', 'active').single();
                 if (!auction) return interaction.reply({ content: '❌ There is no active auction.', flags: [MessageFlags.Ephemeral] });
 
                 const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(safeTitle('💰 Place Bid', auction.name));
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
-                return interaction.showModal(modal);
+                return interaction.showModal(modal).catch(e => {
+                    if (e.code === 10062) console.warn('[MODAL] Token expired on btn_open_bid');
+                    else console.error('[MODAL] showModal Error:', e.message);
+                });
             }
 
             // ── btn_auction_settings ──────────────────────────
@@ -1414,11 +1415,11 @@ client.on('interactionCreate', async interaction => {
                 if (choice === 'opt_add_auction') {
                     const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('⚖️ Create Auction');
                     modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Steam Account High Level').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Optional)').setPlaceholder('e.g. 1499...').setStyle(TextInputStyle.Short).setRequired(false))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Digital Goods').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('params').setLabel('Price, Inc, Dur (Mins)').setPlaceholder('e.g. 50000, 5000, 60').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Manual)').setPlaceholder('e.g. PWACCLVL93').setStyle(TextInputStyle.Short).setRequired(false)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) {
@@ -1962,22 +1963,29 @@ client.on('interactionCreate', async interaction => {
             // ── mod_auction_add ──────────────────────────────
             if (interaction.customId === 'mod_auction_add') {
                 const name = interaction.fields.getTextInputValue('name');
-                const basePriceStr = interaction.fields.getTextInputValue('base_price');
-                const incStr = interaction.fields.getTextInputValue('increment');
-                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
+                const category = interaction.fields.getTextInputValue('category');
+                const params = interaction.fields.getTextInputValue('params');
                 const linkedPid = interaction.fields.getTextInputValue('pid') || null;
-                const desc = '-'; // Removed from modal to stay within 5-field limit
+                const desc = interaction.fields.getTextInputValue('desc');
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
-                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
-                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return interaction.editReply({ content: '❌ Invalid price, increment, or duration format.' });
+                // Parse combined field: price, inc, duration
+                const parts = params.split(/[,\s]+/).map(p => p.trim());
+                if (parts.length < 3) return interaction.editReply({ content: '❌ Invalid format for Price, Inc, Duration. Use: `price, increment, duration`' });
+
+                const basePrice = parseInt(parts[0].replace(/\D/g, ''));
+                const increment = parseInt(parts[1].replace(/\D/g, ''));
+                const duration = parseInt(parts[2].replace(/\D/g, ''));
+
+                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment))
+                    return interaction.editReply({ content: '❌ Invalid numeric mapping in Price, Inc, or Duration.' });
 
                 const endTime = new Date(Date.now() + duration * 60000).toISOString();
 
                 const { error: insertErr } = await supabase.from('auctions').insert([{
                     name,
+                    category_name: category,
                     description: desc,
                     base_price: basePrice,
                     current_bid: basePrice,
@@ -2007,7 +2015,6 @@ client.on('interactionCreate', async interaction => {
                         await interaction.reply({ content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
 
                         // Send log to restricted-users channel
-                        const config = loadConfig();
                         const logChan = await client.channels.fetch('1503766353721430036').catch(() => null);
                         if (logChan) {
                             const embed = new EmbedBuilder()
@@ -2027,6 +2034,10 @@ client.on('interactionCreate', async interaction => {
                 }
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                // Check registration here to ensure token stability at start
+                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
+                if (!user) return interaction.editReply({ content: '❌ You are not registered for the auction. Please click **Register** on the dashboard first.' });
 
                 const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
                 if (!auction) return interaction.editReply({ content: '❌ No active auction found.' });
