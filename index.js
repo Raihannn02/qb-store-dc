@@ -93,18 +93,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.0',
-    codename: 'Resilient Flow Premium',
+    version: '3.0.1',
+    codename: 'Elite UI Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Auction UI: Elite Dashboard redesign with structured layout.' },
+        { type: 'NEW', desc: 'Auction UI: Refined bid history (Top 1 + 10 Bidders) display.' },
         { type: 'SYS', desc: 'Resiliency: Implemented auto-retry for Discord API connection timeouts.' },
         { type: 'SYS', desc: 'Resiliency: Optimized interaction handling with immediate response deferral.' },
-        { type: 'FIX', desc: 'Live Stock: Enforced strict separation from Auction products (system_type filter).' },
-        { type: 'NEW', desc: 'Auction System: Automated auction ending when timer expires.' },
-        { type: 'NEW', desc: 'Auction System: Detailed bid history (Top 11 bidders) on Dashboard.' },
-        { type: 'NEW', desc: 'Logging: Specialized Auction Transaction & Delivery logs.' },
-        { type: 'NEW', desc: 'UI: Professional Auction-specific Order Confirmed embed.' },
-        { type: 'FIX', desc: 'Auction System: Resolved modal token expiry by implementing zero-latency response.' }
+        { type: 'FIX', desc: 'Live Stock: Enforced strict separation from Auction products.' }
     ]
 };
 
@@ -448,10 +445,14 @@ async function updateAuctionDashboard() {
         AUCTION_CACHE.active = !!auction;
         AUCTION_CACHE.name = auction ? auction.name : '';
 
-        const embed = new EmbedBuilder().setTitle('⚖️ AUCTION SYSTEM DASHBOARD').setColor('#2b2d31').setTimestamp().setFooter({ text: 'QUANTUMBLOX AUCTION v2.9.9' });
+        const embed = new EmbedBuilder()
+            .setTitle('⚖️  AUCTION SYSTEM DASHBOARD')
+            .setColor('#2b2d31')
+            .setTimestamp()
+            .setFooter({ text: `QUANTUMBLOX AUCTION v${BOT_VERSION.version} • Elite Architecture` });
 
         if (!auction) {
-            embed.setDescription('>>> No active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
+            embed.setDescription('>>> 🛑 **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
                 .addFields({ name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
             const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
@@ -463,20 +464,23 @@ async function updateAuctionDashboard() {
                 .order('amount', { ascending: false })
                 .limit(11);
 
-            let standingText = `🏆 Highest Bid: **${formatPrice(auction.current_bid)}**\n👤 Bidder: ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n⏳ Ends: <t:${unixEnd}:R>`;
+            let standingText = `🏆 **Highest Bid:** ${formatPrice(auction.current_bid)}\n👤 **Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n⏳ **Remaining:** <t:${unixEnd}:R>`;
 
+            let historyText = '*No previous bids recorded.*';
             if (bids && bids.length > 1) {
-                standingText += `\n\n**Top Bidders:**\n` + bids.slice(1).map((b, i) => `${i + 1}. <@${b.user_id}> - **${formatPrice(b.amount)}**`).join('\n');
+                historyText = bids.slice(1).map((b, i) => `**#${i + 2}** <@${b.user_id}> — **${formatPrice(b.amount)}**`).join('\n');
             }
 
-            embed.setFields(
-                { name: 'Product Name', value: `\`${auction.name}\``, inline: true },
-                { name: 'Category', value: `\`${auction.category_name || 'Digital'}\``, inline: true },
-                { name: 'Description', value: `${auction.description || '-'}`, inline: false },
-                { name: 'Current Standing', value: standingText, inline: false },
-                { name: 'Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic BAN.\n• Settlement: Winner must finalize payment within 24 hours.`, inline: false },
-                { name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
-            );
+            embed.setDescription(`>>> 🟢 **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
+                .setFields(
+                    { name: '📦 Product Information', value: `**Name:** \`${auction.name}\`\n**Category:** \`${auction.category_name || 'Digital'}\`\n**Product ID:** \`${auction.product_id || '-'}\``, inline: false },
+                    { name: '📝 Description', value: `${auction.description || 'No description provided.'}`, inline: false },
+                    { name: '📊 Current Standing', value: standingText, inline: true },
+                    { name: '⏳ End Time', value: `<t:${unixEnd}:F>`, inline: true },
+                    { name: '📈 Bid History (Top 10)', value: historyText, inline: false },
+                    { name: '⚖️ Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic BAN.\n• Settlement: Winner must finalize payment within 24 hours.`, inline: false },
+                    { name: '🔄 Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                );
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -564,9 +568,10 @@ async function endAuction(aid) {
         const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
         if (winChan) {
             const winEmbed = new EmbedBuilder()
-                .setTitle('🏆 AUCTION WINNER!')
+                .setTitle('🏆  AUCTION CONCLUDED')
                 .setColor('#f1c40f')
-                .setDescription(`The auction for **${auction.name}** has ended!\n\n👑 **Winner:** <@${winnerId}>\n💰 **Winning Bid:** \`${formatPrice(finalAmount)}\`\n\n*Please check your DMs for payment instructions.*`)
+                .setDescription(`>>> The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has been notified via DM to finalize the transaction.*`)
+                .setFooter({ text: 'Elite Auction Resolution System' })
                 .setTimestamp();
             await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
         }
@@ -593,16 +598,16 @@ async function endAuction(aid) {
                 const winner = await client.users.fetch(winnerId).catch(() => null);
                 if (winner) {
                     const embed = new EmbedBuilder()
-                        .setTitle('🏆  Auction Won!')
+                        .setTitle('🏆  AUCTION VICTORY!')
                         .setColor('#f1c40f')
-                        .setDescription(`Congratulations! You won the auction for **${auction.name}**.\n\nPlease complete the payment using the QRIS below to receive your item.`)
+                        .setDescription(`>>> Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below within 24 hours to finalize your acquisition.`)
                         .addFields(
-                            { name: 'Product', value: auction.name, inline: true },
-                            { name: 'Final Bid', value: formatPrice(finalAmount), inline: true },
-                            { name: 'Order ID', value: `\`${orderId}\``, inline: false }
+                            { name: '📦 Item', value: `\`${auction.name}\``, inline: true },
+                            { name: '💰 Final Bid', value: `**${formatPrice(finalAmount)}**`, inline: true },
+                            { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
-                        .setFooter({ text: 'QUANTUMBLOX AUCTION SYSTEM' }).setTimestamp();
+                        .setFooter({ text: 'Elite Auction Redemption Portal' }).setTimestamp();
 
                     const btn = new ActionRowBuilder().addComponents(
                         new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
@@ -1179,14 +1184,15 @@ client.on('interactionCreate', async interaction => {
 
                         // 2. Ephemeral Response on Dashboard
                         const confirmEmbed = new EmbedBuilder()
-                            .setTitle(isAuction ? '⚖️  Auction Order Confirmed' : '✅  Order Confirmed')
+                            .setTitle(isAuction ? '⚖️  AUCTION ORDER CONFIRMED' : '✅  ORDER CONFIRMED')
                             .setColor(isAuction ? '#f1c40f' : '#00b894')
-                            .setDescription('Your request has been processed. Your item(s) have been delivered to your DMs.')
+                            .setDescription(`Your request has been successfully processed.${isAuction ? ' As the winner, your exclusive items have been delivered below.' : ' Your items are ready for pickup.'}`)
                             .addFields(
-                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                { name: 'Product', value: pay.product_id, inline: true },
-                                { name: 'Total', value: fmt, inline: true }
+                                { name: '📦 Product', value: `\`${pay.product_id}\``, inline: true },
+                                { name: '💰 Total Amount', value: `\`${fmt}\``, inline: true },
+                                { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
                             )
+                            .setFooter({ text: `QUANTUMBLOX ${isAuction ? 'AUCTION' : 'STORE'} • Elite Fulfillment` })
                             .setTimestamp();
                         await interaction.editReply({ embeds: [confirmEmbed] });
 
@@ -1196,15 +1202,16 @@ client.on('interactionCreate', async interaction => {
                             const transChan = await client.channels.fetch(process.env.AUCTION_TRANSACTION_LOG_ID).catch(() => null);
                             if (transChan) {
                                 const transEmbed = new EmbedBuilder()
-                                    .setTitle('💰  Auction Transaction Received')
+                                    .setTitle('💰  AUCTION TRANSACTION LOG')
                                     .setColor('#f1c40f')
                                     .addFields(
+                                        { name: 'Buyer / Winner', value: `<@${interaction.user.id}>`, inline: true },
+                                        { name: 'Product ID', value: `\`${pay.product_id}\``, inline: true },
+                                        { name: 'Final Amount', value: `**${fmt}**`, inline: true },
                                         { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                        { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
-                                        { name: 'Product', value: pay.product_id, inline: true },
-                                        { name: 'Amount Paid', value: fmt, inline: true },
-                                        { name: 'Status', value: '✅ Completed', inline: true }
+                                        { name: 'Status', value: '🟢 `COMPLETED`', inline: true }
                                     )
+                                    .setFooter({ text: 'Elite Auction Transaction System' })
                                     .setTimestamp();
                                 await transChan.send({ embeds: [transEmbed] }).catch(() => { });
                             }
@@ -1212,14 +1219,14 @@ client.on('interactionCreate', async interaction => {
                             const deliveryChan = await client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null);
                             if (deliveryChan) {
                                 const deliveryEmbed = new EmbedBuilder()
-                                    .setTitle('📦  Auction Delivery Success')
+                                    .setTitle('📦  AUCTION DELIVERY LOG')
                                     .setColor('#f1c40f')
                                     .addFields(
-                                        { name: 'Order ID', value: `\`${orderId}\``, inline: true },
                                         { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                        { name: 'Product', value: pay.product_id, inline: false },
-                                        { name: 'Credentials', value: `\`\`\`${deliver.join('\n')}\`\`\``, inline: false }
+                                        { name: 'Order ID', value: `\`${orderId}\``, inline: true },
+                                        { name: 'Stock Delivered', value: `\`\`\`\n${deliver.join('\n')}\n\`\`\``, inline: false }
                                     )
+                                    .setFooter({ text: 'Elite Auction Delivery Module' })
                                     .setTimestamp();
                                 await deliveryChan.send({ embeds: [deliveryEmbed] }).catch(() => { });
                             }
