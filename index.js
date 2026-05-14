@@ -93,10 +93,11 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.3',
+    version: '2.9.4',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Database: Resolved schema cache and Add Auction verification.' },
         { type: 'NEW', desc: 'Auction UI: Removed Price field from Add Category.' },
         { type: 'FIX', desc: 'Discord UI: Resolved duplicate Database Monitor embeds in Stock channel.' },
         { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
