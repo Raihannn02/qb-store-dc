@@ -81,15 +81,15 @@ const client = new Client({
 });
 
 const configPath = path.join(__dirname, 'config.json');
-let dashboardMessageId = null;
+let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 
 // ─────────────────────────────────────────────────────────────
 // BOT VERSION INFO
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.8.0',
-    codename: 'Stock Master',
+    version: '2.8.3',
+    codename: 'Isolation & Resiliency',
     date: '2026-05-14',
     changelog: [
         { type: 'NEW', desc: 'Stock Management: Dedicated real-time dashboard channel' },
@@ -109,6 +109,9 @@ const BOT_VERSION = {
         { type: 'NEW', desc: 'Honeypot: Auto-ban phishing/hacked accounts' },
         { type: 'FIX', desc: 'Honeypot: Optimized instant message auto-delete' },
         { type: 'FIX', desc: 'Resolved all "This interaction failed" errors' },
+        { type: 'NEW', desc: 'Separation: Isolated Live Stock and Auction products via systems' },
+        { type: 'NEW', desc: 'Resiliency: JS-side filtering fallback for missing schema columns' },
+        { type: 'FIX', desc: 'Sync: Persistent dashboard ID tracking across restarts' },
     ]
 };
 
@@ -294,22 +297,27 @@ async function updateDashboard() {
             new ButtonBuilder().setCustomId('btn_admin_settings').setLabel('Setting').setStyle(ButtonStyle.Secondary)
         );
 
-        if (dashboardMessageId) {
+        if (config.dashboardMessageId) {
             try {
-                const msg = await channel.messages.fetch(dashboardMessageId);
+                const msg = await channel.messages.fetch(config.dashboardMessageId);
                 await msg.edit({ embeds: [embed], components: [row] });
                 return;
-            } catch { dashboardMessageId = null; }
+            } catch {
+                config.dashboardMessageId = null;
+                saveConfig(config);
+            }
         }
 
-        const msgs = await channel.messages.fetch({ limit: 10 });
-        const botMsg = msgs.find(m => m.author.id === client.user.id);
+        const msgs = await channel.messages.fetch({ limit: 20 });
+        const botMsg = msgs.find(m => m.author.id === client.user.id && m.embeds[0]?.title?.includes('Shop Dashboard'));
         if (botMsg) {
             await botMsg.edit({ embeds: [embed], components: [row] });
-            dashboardMessageId = botMsg.id;
+            config.dashboardMessageId = botMsg.id;
+            saveConfig(config);
         } else {
             const nMsg = await channel.send({ embeds: [embed], components: [row] });
-            dashboardMessageId = nMsg.id;
+            config.dashboardMessageId = nMsg.id;
+            saveConfig(config);
         }
     } catch (e) {
         if (e.code === 'ENOTFOUND' || e.code === 'ETIMEDOUT') return;
