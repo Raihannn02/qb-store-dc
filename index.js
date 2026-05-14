@@ -93,10 +93,11 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.2',
+    version: '2.9.3',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Auction UI: Removed Price field from Add Category.' },
         { type: 'FIX', desc: 'Discord UI: Resolved duplicate Database Monitor embeds in Stock channel.' },
         { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
         { type: 'NEW', desc: 'Administrative: Delete Auction Categories with Safety UI.' },
@@ -1425,8 +1426,7 @@ client.on('interactionCreate', async interaction => {
                     const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Category');
                     modal.addComponents(
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(false)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Category Name').setPlaceholder('e.g. Steam Account').setStyle(TextInputStyle.Short).setRequired(true))
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) { console.error('[MODAL] opt_add_category failed:', e.message); return; }
@@ -1897,8 +1897,6 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'mod_add_category') {
                 const manualPid = interaction.fields.getTextInputValue('pid')?.trim();
                 const name = interaction.fields.getTextInputValue('name');
-                const priceStr = interaction.fields.getTextInputValue('price');
-                const price = priceStr.replace(/[^0-9]/g, '');
 
                 await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
@@ -1908,7 +1906,7 @@ client.on('interactionCreate', async interaction => {
                 const { error: insertErr } = await safeInsertProduct({
                     id,
                     name,
-                    price: `Rp. ${new Intl.NumberFormat('id-ID').format(price)}`,
+                    price: 'Auction',
                     stock: 0,
                     format: 'N/A',
                     description: '-',
