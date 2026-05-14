@@ -93,31 +93,18 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.9',
-    codename: 'Stellar Stability Premium',
+    version: '3.0.0',
+    codename: 'Resilient Flow Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'SYS', desc: 'Resiliency: Implemented auto-retry for Discord API connection timeouts.' },
+        { type: 'SYS', desc: 'Resiliency: Optimized interaction handling with immediate response deferral.' },
+        { type: 'FIX', desc: 'Live Stock: Enforced strict separation from Auction products (system_type filter).' },
         { type: 'NEW', desc: 'Auction System: Automated auction ending when timer expires.' },
         { type: 'NEW', desc: 'Auction System: Detailed bid history (Top 11 bidders) on Dashboard.' },
         { type: 'NEW', desc: 'Logging: Specialized Auction Transaction & Delivery logs.' },
         { type: 'NEW', desc: 'UI: Professional Auction-specific Order Confirmed embed.' },
-        { type: 'FIX', desc: 'Auction System: Resolved modal token expiry by implementing zero-latency response.' },
-        { type: 'NEW', desc: 'Auction System: Refactored to Product-Centric model.' },
-        { type: 'NEW', desc: 'Auction System: Renamed Category Management to Product Management.' },
-        { type: 'NEW', desc: 'UI: Streamlined Add Auction modal with automatic info retrieval.' },
-        { type: 'NEW', desc: 'Auction System: Professional UI redesign for Dashboard.' },
-        { type: 'NEW', desc: 'Auction System: Added Category and Description fields.' },
-        { type: 'FIX', desc: 'Stability: Optimized interaction handling to prevent Unknown Interaction errors.' },
-        { type: 'SYS', desc: 'Resolved Unknown interaction spam on inactive Modals.' },
-        { type: 'FIX', desc: 'Database: Resolved schema cache and product_id verification.' },
-        { type: 'NEW', desc: 'Auction UI: Removed Price field from Add Category.' },
-        { type: 'FIX', desc: 'Discord UI: Resolved duplicate Database Monitor embeds in Stock channel.' },
-        { type: 'NEW', desc: 'Administrative: Edit Auction Categories via Modal.' },
-        { type: 'NEW', desc: 'Administrative: Delete Auction Categories with Safety UI.' },
-        { type: 'NEW', desc: 'Auction Utility: Manual Product ID assignment.' },
-        { type: 'FIX', desc: 'Discord UI: Enforced 45-char limit on Modal Titles.' },
-        { type: 'FIX', desc: 'Database: Preemptive cleanup for FK constraints.' },
-        { type: 'SYS', desc: 'Stability: Sequential startup and memory caching.' }
+        { type: 'FIX', desc: 'Auction System: Resolved modal token expiry by implementing zero-latency response.' }
     ]
 };
 
@@ -362,14 +349,16 @@ async function updateDatabaseEmbed(productId) {
             });
 
             if (msg) {
-                await msg.edit({ embeds: [embed], components: [row] });
+                await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Edit failed for ${productId}:`, e.message));
             } else {
-                const nMsg = await channel.send({ embeds: [embed], components: [row] });
-                const cfg = loadConfig(); // Reload to avoid race
-                if (!cfg.monitorMessages) cfg.monitorMessages = {};
-                cfg.monitorMessages[productId] = nMsg.id;
-                cfg[`monitor_${productId}`] = nMsg.id; // Compatibility with getOrCreate helper
-                saveConfig(cfg);
+                const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Send failed for ${productId}:`, e.message));
+                const cfg = loadConfig();
+                if (nMsg) {
+                    if (!cfg.monitorMessages) cfg.monitorMessages = {};
+                    cfg.monitorMessages[productId] = nMsg.id;
+                    cfg[`monitor_${productId}`] = nMsg.id;
+                    saveConfig(cfg);
+                }
             }
         });
         console.log(`[DB EMBED] Embed updated for '${productId}'`);
@@ -429,11 +418,13 @@ async function updateDashboard() {
 
         const targetTitle = config.embed?.title || 'Shop Dashboard';
         const msg = await getOrCreateDashboardMessage(channel, 'dashboardMessageId', [targetTitle]);
-        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[DASHBOARD] Edit failed:', e.message));
         else {
-            const nMsg = await channel.send({ embeds: [embed], components: [row] });
-            config.dashboardMessageId = nMsg.id;
-            saveConfig(config);
+            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[DASHBOARD] Send failed:', e.message));
+            if (nMsg) {
+                config.dashboardMessageId = nMsg.id;
+                saveConfig(config);
+            }
         }
     });
 }
@@ -495,11 +486,13 @@ async function updateAuctionDashboard() {
         );
 
         const msg = await getOrCreateDashboardMessage(channel, 'auctionMessageId', ['AUCTION SYSTEM DASHBOARD']);
-        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[AUCTION] Edit failed:', e.message));
         else {
-            const nMsg = await channel.send({ embeds: [embed], components: [row] });
-            config.auctionMessageId = nMsg.id;
-            saveConfig(config);
+            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[AUCTION] Send failed:', e.message));
+            if (nMsg) {
+                config.auctionMessageId = nMsg.id;
+                saveConfig(config);
+            }
         }
     });
 }
@@ -661,11 +654,13 @@ async function updateStockDashboard() {
         );
 
         const msg = await getOrCreateDashboardMessage(channel, 'stockMessageId', ['STOCK MANAGEMENT SYSTEM']);
-        if (msg) await msg.edit({ embeds: [embed], components: [row] });
+        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[STOCK] Edit failed:', e.message));
         else {
-            const nMsg = await channel.send({ embeds: [embed], components: [row] });
-            config.stockMessageId = nMsg.id;
-            saveConfig(config);
+            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[STOCK] Send failed:', e.message));
+            if (nMsg) {
+                config.stockMessageId = nMsg.id;
+                saveConfig(config);
+            }
         }
     });
 }
@@ -1506,11 +1501,7 @@ client.on('interactionCreate', async interaction => {
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) {
-                        if (e.code === 10062 || String(e.message).includes('Unknown interaction')) {
-                            console.warn('[MODAL] Token expired for opt_add_auction (select menu dropped). User must reload the settings menu.');
-                        } else {
-                            console.error('[MODAL] opt_add_auction showModal failed:', e.message);
-                        }
+                        console.error('[MODAL] opt_add_auction failed:', e.message);
                         return;
                     }
                 }
@@ -1569,12 +1560,14 @@ client.on('interactionCreate', async interaction => {
             // ── sel_stock_add_pick ───────────────────────────
             if (interaction.customId === 'sel_stock_add_pick') {
                 const pid = interaction.values[0];
-                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(safeTitle('Add Stock', pid)); // Reusing mod_auction_add_stock
+                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(safeTitle('Add Stock', pid));
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Confirmed Product ID').setValue(pid).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2...').setStyle(TextInputStyle.Paragraph).setRequired(true))
                 );
-                return interaction.showModal(modal);
+                try { return await interaction.showModal(modal); }
+                catch (e) { console.error('[MODAL] sel_stock_add_pick failed:', e.message); }
+                return;
             }
 
             // ── sel_stock_edit_pick ──────────────────────────
@@ -2092,10 +2085,10 @@ client.on('interactionCreate', async interaction => {
             }
             // ── mod_auction_add_stock ────────────────────────
             if (interaction.customId === 'mod_auction_add_stock') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
                 const pid = interaction.fields.getTextInputValue('pid');
                 const content = interaction.fields.getTextInputValue('content');
-
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
                 const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                 if (lines.length === 0) return interaction.editReply({ content: '❌ No valid content provided.' });
@@ -2112,8 +2105,10 @@ client.on('interactionCreate', async interaction => {
                 await supabase.from('products').update({ stock: count }).eq('id', pid);
 
                 await interaction.editReply({ content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
-                updateDashboard();
-                updateStockDashboard();
+
+                // Fire and forget updates to keep response fast
+                updateDashboard().catch(() => { });
+                updateStockDashboard().catch(() => { });
                 updateDatabaseEmbed(pid).catch(() => { });
                 return;
             }
@@ -2161,25 +2156,27 @@ client.once('clientReady', async () => {
             const liveDrops = allProducts.filter(p => !isAuctionProduct(p));
             console.log(`[READY] Refreshing ${liveDrops.length} Live Stock monitors...`);
             for (const p of liveDrops) {
-                updateDatabaseEmbed(p.id).catch(e => console.error(`[READY] Failed to update ${p.id}:`, e.message));
+                updateDatabaseEmbed(p.id).catch(e => console.warn(`[READY] Loop update failed for ${p.id}:`, e.message));
             }
         }
 
         const config = loadConfig();
-        const interval = Math.max(10000, config.updateInterval || 30000); // 30s recommended for stability
+        const interval = Math.max(30000, config.updateInterval || 45000); // 45s recommended for stability
 
         // Wait for initial syncs to settle before starting loop
         setTimeout(() => {
             console.log(`[LOOP] Starting background refresh every ${interval / 1000}s...`);
-            setInterval(() => {
-                updateDashboard();
-                updateVersionDashboard();
-                updateAuctionDashboard();
-                updateStockDashboard();
-                checkAuctionDeadlines();
-                updateHoneypotWarning();
+            setInterval(async () => {
+                try {
+                    await updateDashboard().catch(() => { });
+                    await updateStockDashboard().catch(() => { });
+                    await updateAuctionDashboard().catch(() => { });
+                    await updateVersionDashboard().catch(() => { });
+                    checkAuctionDeadlines();
+                    updateHoneypotWarning();
+                } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
             }, interval);
-        }, 5000);
+        }, 10000);
     } catch (e) {
         console.error('[FATAL] Readiness failed:', e);
     }
