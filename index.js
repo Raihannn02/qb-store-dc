@@ -448,8 +448,7 @@ async function updateAuctionDashboard() {
         const embed = new EmbedBuilder()
             .setTitle('⚖️  AUCTION SYSTEM DASHBOARD')
             .setColor('#2b2d31')
-            .setTimestamp()
-            .setFooter({ text: `QUANTUMBLOX AUCTION v${BOT_VERSION.version} • Elite Architecture` });
+            .setTimestamp();
 
         if (!auction) {
             embed.setDescription('>>> 🛑 **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
