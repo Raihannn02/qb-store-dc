@@ -88,15 +88,15 @@ let dashboardMessageId = null;
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.7.0',
-    codename: 'Auction Pro',
+    version: '2.7.5',
+    codename: 'Auction Pro+',
     date: '2026-05-14',
     changelog: [
+        { type: 'NEW', desc: 'Auction v2.7.5: Integrated Stock Management into Auction Settings' },
         { type: 'NEW', desc: 'Auction v2: Multi-channel Winner Notifications & Auto-Delivery' },
-        { type: 'NEW', desc: 'Auction v2: Bid Increment Configuration & Enforcement' },
-        { type: 'NEW', desc: 'Auction v2: 24h Non-payment Auto-Ban Worker' },
-        { type: 'FIX', desc: 'UI: Polished Auction Dashboard with ⚖️ layout' },
-        { type: 'FIX', desc: 'Stability: Embed character limit protection (Version Dashboard)' },
+        { type: 'FIX', desc: 'Schema: Improved bid_increment handling & cache sync' },
+        { type: 'FIX', desc: 'UI: Polished Auction Dashboard & ⚖️ icon' },
+        { type: 'SYS', desc: 'Reliability: Embed character limit protection (Version Dashboard)' },
         { type: 'NEW', desc: 'Maintenance: Persistent disk storage & Auto-Sync' },
         { type: 'FIX', desc: 'Sync: Dashboard now displays maintenance labels' },
         { type: 'SYS', desc: 'Reliability: Removed cache for critical settings' },
@@ -778,7 +778,8 @@ client.on('interactionCreate', async interaction => {
                     .setCustomId('sel_auction_admin')
                     .setPlaceholder('Auction Management...')
                     .addOptions([
-                        { label: 'Add Auction Product', description: 'Create a new auction', value: 'opt_add_auction', emoji: '➕' },
+                        { label: 'Add Auction Product', description: 'Create a new auction session', value: 'opt_add_auction', emoji: '➕' },
+                        { label: 'Add Stock Data', description: 'Quickly add products to stock', value: 'opt_add_auction_stock', emoji: '📦' },
                         { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
                     ]);
 
@@ -1232,6 +1233,16 @@ client.on('interactionCreate', async interaction => {
                     );
                     try { return await interaction.showModal(modal); }
                     catch (e) { console.error('[MODAL] opt_add_auction showModal failed:', e.message); return; }
+                }
+
+                if (choice === 'opt_add_auction_stock') {
+                    const modal = new ModalBuilder().setCustomId('mod_auction_add_stock').setTitle('📦 Add Stock Data');
+                    modal.addComponents(
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Stock Product ID').setPlaceholder('Enter the ID of the product...').setStyle(TextInputStyle.Short).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2\nitem3...').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                    );
+                    try { return await interaction.showModal(modal); }
+                    catch (e) { console.error('[MODAL] opt_add_auction_stock failed:', e.message); return; }
                 }
 
                 if (choice === 'opt_toggle_auction') {
@@ -1712,6 +1723,33 @@ client.on('interactionCreate', async interaction => {
                 updateAuctionDashboard();
                 return;
             }
+            // ── mod_auction_add_stock ────────────────────────
+            if (interaction.customId === 'mod_auction_add_stock') {
+                const pid = interaction.fields.getTextInputValue('pid');
+                const content = interaction.fields.getTextInputValue('content');
+
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+                const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                if (lines.length === 0) return interaction.editReply({ content: '❌ No valid content provided.' });
+
+                const { data: prod } = await supabase.from('products').select('id, name').eq('id', pid).single();
+                if (!prod) return interaction.editReply({ content: `❌ Product ID \`${pid}\` not found.` });
+
+                const inserts = lines.map(line => ({ product_id: pid, content: line }));
+                const { error: stockErr } = await supabase.from('stock').insert(inserts);
+
+                if (stockErr) return interaction.editReply({ content: `❌ Failed to add stock: ${stockErr.message}` });
+
+                const { count } = await supabase.from('stock').select('id', { count: 'exact', head: true }).eq('product_id', pid);
+                await supabase.from('products').update({ stock: count }).eq('id', pid);
+
+                await interaction.editReply({ content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
+                updateDashboard();
+                updateDatabaseEmbed(pid).catch(() => { });
+                return;
+            }
+
         }
 
     } catch (e) {
