@@ -93,10 +93,11 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '2.9.7',
+    version: '2.9.8',
     codename: 'Stellar Stability Premium',
     date: 'May 14, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Auction System: Resolved modal token expiry by implementing zero-latency response.' },
         { type: 'NEW', desc: 'Auction System: Refactored to Product-Centric model.' },
         { type: 'NEW', desc: 'Auction System: Renamed Category Management to Product Management.' },
         { type: 'NEW', desc: 'UI: Streamlined Add Auction modal with automatic info retrieval.' },
@@ -115,6 +116,12 @@ const BOT_VERSION = {
         { type: 'SYS', desc: 'Stability: Sequential startup and memory caching.' }
     ]
 };
+
+// ─────────────────────────────────────────────────────────────
+// STATE CACHE
+// ─────────────────────────────────────────────────────────────
+
+let AUCTION_CACHE = { active: false, name: '' };
 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD SYNC & LOCKS
@@ -441,6 +448,11 @@ async function updateAuctionDashboard() {
         if (!channel) return;
 
         const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
+
+        // Update state cache for zero-latency interactions
+        AUCTION_CACHE.active = !!auction;
+        AUCTION_CACHE.name = auction ? auction.name : '';
+
         const embed = new EmbedBuilder().setTitle('⚖️ AUCTION SYSTEM DASHBOARD').setColor('#2b2d31').setTimestamp();
 
         if (!auction) {
@@ -889,17 +901,15 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_open_bid ──────────────────────────────────
             if (interaction.customId === 'btn_open_bid') {
-                // Optimization: Show modal FIRST to avoid interaction timeout while checking DB
-                const { data: auction } = await supabase.from('auctions').select('name').eq('status', 'active').single();
-                if (!auction) return interaction.reply({ content: '❌ There is no active auction.', flags: [MessageFlags.Ephemeral] });
-
-                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(safeTitle('💰 Place Bid', auction.name));
+                // MUST BE ZERO-LATENCY: Use memory cache instead of DB lookup
+                // This prevents the 3-second Discord interaction token from expiring.
+                const auctionName = AUCTION_CACHE.name || 'Current Auction';
+                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(safeTitle('💰 Place Bid', auctionName));
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
                 ));
                 return interaction.showModal(modal).catch(e => {
-                    if (e.code === 10062) console.warn('[MODAL] Token expired on btn_open_bid');
-                    else console.error('[MODAL] showModal Error:', e.message);
+                    console.error('[MODAL] showModal Error (Token probably expired):', e.message);
                 });
             }
 
