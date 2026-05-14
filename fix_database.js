@@ -48,6 +48,22 @@ async function migrate() {
         console.log('✅ "auction_bids" table is ready.');
     }
 
+    console.log('\n🚀 Verifying "banned_users" table (Security)...');
+    const { error: banErr } = await supabase.from('banned_users').select('id').limit(1);
+
+    if (banErr) {
+        console.log('❌ "banned_users" table is missing.');
+        console.log('IMPORTANT: Run the following SQL in Supabase SQL Editor:\n');
+        console.log('-- Create banned_users table');
+        console.log('CREATE TABLE IF NOT EXISTS banned_users (');
+        console.log('  id TEXT PRIMARY KEY,');
+        console.log('  reason TEXT,');
+        console.log('  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+        console.log(');');
+    } else {
+        console.log('✅ "banned_users" table is ready.');
+    }
+
     // Note: supabase-js cannot run ALTER TABLE directly unless a custom RPC is defined.
     // So we primarily guide the user to the SQL Editor.
 }

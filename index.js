@@ -93,13 +93,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.0.4',
-    codename: 'Minimalist Elite',
+    version: '3.0.5',
+    codename: 'Auto-Settlement Premium',
     date: 'May 14, 2026',
     changelog: [
-        { type: 'UI', desc: 'Aesthetics: Final minimalist polish (removed all block quotes).' },
-        { type: 'UI', desc: 'Privacy: Enhanced security for public delivery logs.' },
-        { type: 'FIX', desc: 'Auction: Optimized fulfillment and interaction stability.' }
+        { type: 'NEW', desc: 'Settlement: 1-hour payment deadline enforced with Auto-Ban.' },
+        { type: 'NEW', desc: 'Settlement: Automatic auction re-opening on payment default.' },
+        { type: 'SYS', desc: 'Security: Global Banned Users check implemented.' },
+        { type: 'UI', desc: 'Minimalist: All block quotes removed from status messages.' }
     ]
 };
 
@@ -475,7 +476,7 @@ async function updateAuctionDashboard() {
                     { name: '📊 Current Standing', value: standingText, inline: true },
                     { name: '⏳ End Time', value: `<t:${unixEnd}:F>`, inline: true },
                     { name: '📈 Bid History (Top 10)', value: historyText, inline: false },
-                    { name: '⚖️ Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic BAN.\n• Settlement: Winner must finalize payment within 24 hours.`, inline: false },
+                    { name: '⚖️ Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic **PERMANENT BAN**.\n• Settlement: Winner must finalize payment within **1 hour**.`, inline: false },
                     { name: '🔄 Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
                 );
         }
@@ -559,7 +560,8 @@ async function endAuction(aid) {
     if (auction.highest_bidder_id) {
         const winnerId = auction.highest_bidder_id;
         const finalAmount = auction.current_bid;
-        const orderId = `AUC${Date.now()}`;
+        // orderId format: AUC_AID_TS (Stored in product_id field for settlement lookup if needed)
+        const orderId = `AUC_${aid}_${Date.now()}`;
 
         // Public Winner Notification
         const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
@@ -567,7 +569,7 @@ async function endAuction(aid) {
             const winEmbed = new EmbedBuilder()
                 .setTitle('🏆  AUCTION CONCLUDED')
                 .setColor('#f1c40f')
-                .setDescription(`The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has been notified via DM to finalize the transaction.*`)
+                .setDescription(`The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has 1 hour to finalize the transaction or face a permanent ban.*`)
                 .setTimestamp();
             await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
         }
@@ -585,7 +587,7 @@ async function endAuction(aid) {
                 await supabase.from('pending_payments').insert([{
                     invoice_id: orderId,
                     user_id: winnerId,
-                    product_id: auction.product_id, // Use actual ID for fulfillment lookup
+                    product_id: auction.product_id, // For stock delivery lookup
                     qty: 1,
                     amount: finalAmount,
                     created_at: new Date().toISOString()
@@ -596,7 +598,7 @@ async function endAuction(aid) {
                     const embed = new EmbedBuilder()
                         .setTitle('🏆  AUCTION VICTORY!')
                         .setColor('#f1c40f')
-                        .setDescription(`Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below within 24 hours to finalize your acquisition.`)
+                        .setDescription(`Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below **within 1 hour** to finalize your acquisition. Failure to pay will result in an automatic **PERMANENT BAN**.`)
                         .addFields(
                             { name: '📦 Item', value: `\`${auction.name}\``, inline: true },
                             { name: '💰 Final Bid', value: `**${formatPrice(finalAmount)}**`, inline: true },
@@ -616,6 +618,75 @@ async function endAuction(aid) {
         }
     }
     updateAuctionDashboard();
+}
+
+async function checkAuctionSettlements() {
+    try {
+        const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
+        const { data: expired } = await supabase.from('pending_payments')
+            .select('*')
+            .filter('invoice_id', 'like', 'AUC_%')
+            .lt('created_at', oneHourAgo);
+
+        if (!expired || expired.length === 0) return;
+
+        for (const pay of expired) {
+            const parts = pay.invoice_id.split('_');
+            if (parts.length < 3) continue;
+            const aid = parts[1];
+            const userId = pay.user_id;
+
+            console.log(`[SETTLEMENT] Auction ${aid} winner ${userId} failed to pay. Processing ban and reroll...`);
+
+            // 1. Permanent Ban
+            await supabase.from('banned_users').upsert([{ id: userId, reason: 'Auction Payment Default (Fake/Troll Bid)', created_at: new Date().toISOString() }]);
+
+            // 2. Remove fake bids
+            await supabase.from('auction_bids').delete().eq('auction_id', aid).eq('user_id', userId);
+
+            // 3. Find 2nd highest bidder (if any)
+            const { data: nextBid } = await supabase.from('auction_bids')
+                .select('*')
+                .eq('auction_id', aid)
+                .order('amount', { ascending: false })
+                .limit(1)
+                .single();
+
+            // 4. Re-open Auction
+            if (nextBid) {
+                await supabase.from('auctions').update({
+                    status: 'active',
+                    current_bid: nextBid.amount,
+                    highest_bidder_id: nextBid.user_id,
+                    end_time: new Date(Date.now() + 3600000).toISOString() // Restart with 1 hour remaining
+                }).eq('id', aid);
+
+                const channel = await client.channels.fetch(process.env.AUCTION_CHANNEL_ID).catch(() => null);
+                if (channel) {
+                    const embed = new EmbedBuilder()
+                        .setTitle('⚠️  AUCTION RE-OPENED')
+                        .setColor('#e74c3c')
+                        .setDescription(`The previous winner failed to fulfill their bid for **${pay.product_id}**.\n\n👑 **Auction Resumed:** **${formatPrice(nextBid.amount)}** by <@${nextBid.user_id}>\n⏳ **New Deadline:** <t:${Math.floor((Date.now() + 3600000) / 1000)}:R>\n\n*The troll bidder has been permanently banned.*`)
+                        .setTimestamp();
+                    await channel.send({ content: '@everyone', embeds: [embed] }).catch(() => { });
+                }
+            } else {
+                // No valid bids left, keep active but reset
+                await supabase.from('auctions').update({
+                    status: 'active',
+                    current_bid: 0,
+                    highest_bidder_id: null,
+                    end_time: new Date(Date.now() + 3600000).toISOString()
+                }).eq('id', aid);
+            }
+
+            // 5. Cleanup
+            await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+        }
+        await updateAuctionDashboard();
+    } catch (e) {
+        console.error('[SETTLEMENT] Loop error:', e.message);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -884,6 +955,17 @@ client.on('messageCreate', async message => {
 client.on('interactionCreate', async interaction => {
     try {
         console.log(`[INTERACTION] ${interaction.user.tag} (${interaction.user.id}) triggered ${interaction.type} (ID: ${interaction.customId || "N/A"})`);
+
+        // ── Global Banned Check ──
+        const { data: banData } = await supabase.from('banned_users').select('id, reason').eq('id', interaction.user.id).single();
+        if (banData) {
+            const content = `❌ **ACCESS DENIED:** You have been permanently banned from the Auction & Store system.\n**Reason:** \`${banData.reason || 'Violation of terms'}\``;
+            if (interaction.isRepliable()) {
+                if (interaction.deferred || interaction.replied) return interaction.editReply({ content });
+                return interaction.reply({ content, flags: [MessageFlags.Ephemeral] });
+            }
+            return;
+        }
 
         // ── SLASH COMMANDS (disabled) ─────────────────────────
         if (interaction.isChatInputCommand()) {
@@ -2152,6 +2234,7 @@ client.once('clientReady', async () => {
         await updateAuctionDashboard().catch(e => console.error('[READY] Auction dash failed:', e.message));
         await updateStockDashboard().catch(e => console.error('[READY] Stock dash failed:', e.message));
         checkAuctionDeadlines();
+        checkAuctionSettlements();
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
 
         // Refresh database monitor embeds on startup (Live Stock Only)
@@ -2175,8 +2258,9 @@ client.once('clientReady', async () => {
                     await updateDashboard().catch(() => { });
                     await updateStockDashboard().catch(() => { });
                     await updateAuctionDashboard().catch(() => { });
-                    await updateVersionDashboard().catch(() => { });
+                    updateVersionDashboard().catch(() => { });
                     checkAuctionDeadlines();
+                    checkAuctionSettlements();
                     updateHoneypotWarning();
                 } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
             }, interval);
