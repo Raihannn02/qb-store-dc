@@ -129,14 +129,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.5.0',
-    codename: 'Turbo Cache',
+    version: '3.5.1',
+    codename: 'No Duplicate',
     date: 'May 16, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Database: Fixed duplicate embed on restart (re-use saved message_id).' },
+        { type: 'FIX', desc: 'Startup: Sequential sync with dedup cleanup for DB monitors.' },
         { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' },
-        { type: 'PERF', desc: 'Debounce: Dashboard/embed refresh debounced to prevent spam.' },
-        { type: 'PERF', desc: 'Parallel: Reduced blocking awaits in interaction handlers.' },
-        { type: 'FIX', desc: 'Loop: Change-detection skip for unchanged dashboard data.' }
+        { type: 'PERF', desc: 'Debounce: Dashboard/embed refresh debounced to prevent spam.' }
     ]
 };
 
@@ -396,12 +396,6 @@ async function updateDatabaseEmbed(productId) {
 
     if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
 
-    const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`btn_db_add_${productId}`).setLabel('Add Stock').setEmoji('➕').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`btn_db_edit_pick_${productId}`).setLabel('Edit Stock').setEmoji('📝').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
-    );
-
     try {
         await withLock(`db_embed_${productId}`, async () => {
             const row = new ActionRowBuilder().addComponents(
@@ -410,26 +404,61 @@ async function updateDatabaseEmbed(productId) {
                 new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
             );
 
-            // Use standardized search (dynamic key for each product)
             const config = loadConfig();
             if (!config.monitorMessages) config.monitorMessages = {};
 
-            const msg = await getOrCreateDashboardMessage(channel, `monitor_${productId}`, [productId], (m) => {
-                const footer = m.embeds[0]?.footer?.text || '';
-                return footer.includes(productId);
-            });
-
-            if (msg) {
-                await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Edit failed for ${productId}:`, e.message));
-            } else {
-                const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Send failed for ${productId}:`, e.message));
-                const cfg = loadConfig();
-                if (nMsg) {
-                    if (!cfg.monitorMessages) cfg.monitorMessages = {};
-                    cfg.monitorMessages[productId] = nMsg.id;
-                    cfg[`monitor_${productId}`] = nMsg.id;
-                    saveConfig(cfg);
+            // 1. Try saved message ID from config (fastest path)
+            const savedMsgId = config.monitorMessages[productId] || config[`monitor_${productId}`];
+            if (savedMsgId) {
+                try {
+                    const existingMsg = await channel.messages.fetch(savedMsgId);
+                    if (existingMsg && existingMsg.author.id === client.user.id) {
+                        await withRetry(() => existingMsg.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                        return;
+                    }
+                } catch (e) {
+                    if (e.code === 10008 || e.status === 404) {
+                        // Message deleted, clear from config
+                        delete config.monitorMessages[productId];
+                        delete config[`monitor_${productId}`];
+                        saveConfig(config);
+                    }
                 }
+            }
+
+            // 2. Fallback: search channel for existing embed with this product ID in description
+            try {
+                const msgs = await channel.messages.fetch({ limit: 100 });
+                const matches = msgs.filter(m => {
+                    if (m.author.id !== client.user.id || !m.embeds?.length) return false;
+                    const desc = m.embeds[0].description || '';
+                    const title = m.embeds[0].title || '';
+                    return desc.includes(productId) && title.includes('DATABASE MONITOR');
+                });
+
+                if (matches.size > 0) {
+                    const primary = matches.first();
+                    // Save to config for next time
+                    config.monitorMessages[productId] = primary.id;
+                    config[`monitor_${productId}`] = primary.id;
+                    saveConfig(config);
+                    // Delete duplicates
+                    for (const [id, m] of matches) {
+                        if (id !== primary.id) await m.delete().catch(() => { });
+                    }
+                    await withRetry(() => primary.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                    return;
+                }
+            } catch { /* channel search failed, proceed to create */ }
+
+            // 3. No existing embed found — create new one
+            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Send failed for ${productId}:`, e.message));
+            if (nMsg) {
+                const cfg = loadConfig();
+                if (!cfg.monitorMessages) cfg.monitorMessages = {};
+                cfg.monitorMessages[productId] = nMsg.id;
+                cfg[`monitor_${productId}`] = nMsg.id;
+                saveConfig(cfg);
             }
         });
         console.log(`[DB EMBED] Embed updated for '${productId}'`);
@@ -2355,14 +2384,15 @@ client.once('clientReady', async () => {
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
         await refreshBanCache(); // Load banned users into memory for 0ms lookups
 
-        // Refresh database monitor embeds on startup (Live Stock Only)
+        // Refresh database monitor embeds on startup (Live Stock Only — Sequential to prevent duplicates)
         const { data: allProducts } = await supabase.from('products').select('*');
         if (allProducts) {
             const liveDrops = allProducts.filter(p => !isAuctionProduct(p));
-            console.log(`[READY] Refreshing ${liveDrops.length} Live Stock monitors...`);
+            console.log(`[READY] Syncing ${liveDrops.length} Live Stock monitors (sequential)...`);
             for (const p of liveDrops) {
-                updateDatabaseEmbed(p.id).catch(e => console.warn(`[READY] Loop update failed for ${p.id}:`, e.message));
+                await updateDatabaseEmbed(p.id).catch(e => console.warn(`[READY] Monitor sync failed for ${p.id}:`, e.message));
             }
+            console.log(`[READY] All Live Stock monitors synced.`);
         }
 
         const config = loadConfig();
