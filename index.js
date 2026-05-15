@@ -65,6 +65,15 @@ async function withRetry(fn, attempts = 3, delayMs = 2000) {
     }
 }
 
+function refreshPresence() {
+    try {
+        client.user.setPresence({
+            activities: [{ name: 'QUANTUMBLOX STORE', type: ActivityType.Watching }],
+            status: 'online'
+        });
+    } catch (e) { console.warn('[PRESENCE] Refresh failed:', e.message); }
+}
+
 // ─────────────────────────────────────────────────────────────
 // PROCESS ERROR HANDLERS
 // ─────────────────────────────────────────────────────────────
@@ -93,13 +102,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.2.1',
-    codename: 'Turbo Response',
-    date: 'May 15, 2026',
+    version: '3.3.0',
+    codename: 'Clean Presence',
+    date: 'May 16, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Handler: Fixed unhandled btn_db_add_ fallthrough (missing return).' },
-        { type: 'PERF', desc: 'Speed: In-memory ban cache + fire-and-forget logging.' },
-        { type: 'SYS', desc: 'Stability: All handlers audited for complete return coverage.' }
+        { type: 'FIX', desc: 'Presence: Auto-refresh after reconnect, reboot & gateway reset.' },
+        { type: 'FIX', desc: 'Logs: Restored Qty field in History Log & Payment Log.' },
+        { type: 'FIX', desc: 'Auction: Shortened Order ID format (AUC{timestamp}).' },
+        { type: 'SYS', desc: 'Embeds: Consistent styling across all log channels.' }
     ]
 };
 
@@ -570,8 +580,8 @@ async function endAuction(aid) {
     if (auction.highest_bidder_id) {
         const winnerId = auction.highest_bidder_id;
         const finalAmount = auction.current_bid;
-        // orderId format: AUC_AID_TS (Stored in product_id field for settlement lookup if needed)
-        const orderId = `AUC_${aid}_${Date.now()}`;
+        // orderId format: AUC{timestamp} — short, unique, clean
+        const orderId = `AUC${Date.now()}`;
 
         // Public Winner Notification
         const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
@@ -641,9 +651,21 @@ async function checkAuctionSettlements() {
         if (!expired || expired.length === 0) return;
 
         for (const pay of expired) {
-            const parts = pay.invoice_id.split('_');
-            if (parts.length < 3) continue;
-            const aid = parts[1];
+            // Lookup auction by product_id (works for both old AUC_X_Y and new AUC{ts} format)
+            const { data: auctionMatch } = await supabase.from('auctions')
+                .select('id')
+                .eq('product_id', pay.product_id)
+                .in('status', ['ended'])
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            const aid = auctionMatch?.id;
+            if (!aid) {
+                console.warn(`[SETTLEMENT] No auction found for product_id ${pay.product_id}, skipping.`);
+                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+                continue;
+            }
             const userId = pay.user_id;
 
             console.log(`[SETTLEMENT] Auction ${aid} winner ${userId} failed to pay. Processing ban and reroll...`);
@@ -1353,20 +1375,22 @@ client.on('interactionCreate', async interaction => {
                                         client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null)
                                     ]);
                                     if (transChan) transChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('💰  AUCTION TRANSACTION LOG').setColor('#f1c40f').addFields(
+                                        embeds: [new EmbedBuilder().setTitle('AUCTION TRANSACTION LOG').setColor('#f1c40f').addFields(
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                             { name: 'Buyer / Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Product ID', value: `\`${pay.product_id}\``, inline: true },
+                                            { name: 'Product', value: `\`${pay.product_id}\``, inline: true },
+                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Final Amount', value: `**${fmt}**`, inline: true },
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                            { name: 'Status', value: '🟢 `COMPLETED`', inline: true }
-                                        ).setTimestamp()]
+                                            { name: 'Status', value: '`COMPLETED`', inline: true }
+                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
                                     }).catch(() => { });
                                     if (deliveryChan) deliveryChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('📦  AUCTION DELIVERY LOG').setColor('#f1c40f').addFields(
+                                        embeds: [new EmbedBuilder().setTitle('AUCTION DELIVERY LOG').setColor('#e17055').addFields(
+                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                             { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: true },
-                                            { name: 'Status', value: '📦 `Check your DM for product delivery`', inline: false }
-                                        ).setTimestamp()]
+                                            { name: 'Product', value: `\`${pay.product_id}\``, inline: true },
+                                            { name: 'Status', value: '`Check your DM for product delivery`', inline: false }
+                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
                                     }).catch(() => { });
                                 } else {
                                     const [histChan, payChan] = await Promise.all([
@@ -1374,21 +1398,23 @@ client.on('interactionCreate', async interaction => {
                                         client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null)
                                     ]);
                                     if (histChan) histChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('Order Completed').addFields(
+                                        embeds: [new EmbedBuilder().setTitle('Order Completed').setColor('#2d3436').addFields(
                                             { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                             { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
                                             { name: 'Product', value: pay.product_id, inline: true },
+                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Total', value: fmt, inline: true },
                                             { name: 'Process', value: 'Automatic', inline: true }
-                                        ).setTimestamp()]
+                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
                                     }).catch(() => { });
                                     if (payChan) payChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('Payment Received').addFields(
+                                        embeds: [new EmbedBuilder().setTitle('Payment Received').setColor('#0984e3').addFields(
                                             { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                                             { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
+                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Total', value: fmt, inline: true },
                                             { name: 'Status', value: 'Completed', inline: true }
-                                        ).setTimestamp()]
+                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
                                     }).catch(() => { });
                                 }
                             } catch (logErr) { console.warn('[LOG] Fire-and-forget logging error:', logErr.message); }
@@ -2255,7 +2281,13 @@ client.once('clientReady', async () => {
     try {
         console.log(`[READY] Bot is online as ${client.user.tag}`);
         console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
-        client.user.setActivity('QUANTUMBLOX STORE ON', { type: ActivityType.Custom });
+        refreshPresence();
+
+        // Auto-refresh presence after gateway reconnect/resume
+        client.on('shardResume', () => {
+            console.log('[PRESENCE] Gateway resumed — refreshing presence...');
+            refreshPresence();
+        });
 
         await checkSchemaSupport();
         await registerCommands();
@@ -2300,6 +2332,7 @@ client.once('clientReady', async () => {
                     checkAuctionSettlements();
                     updateHoneypotWarning();
                     refreshBanCache().catch(() => { }); // Keep ban cache in sync
+                    refreshPresence(); // Maintain presence across reconnects
                 } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
             }, interval);
         }, 15000);
