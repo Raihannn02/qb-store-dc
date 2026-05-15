@@ -129,14 +129,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.3.1',
-    codename: 'Stable VPS',
+    version: '3.4.0',
+    codename: 'Clean Embed',
     date: 'May 16, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Network: Resilient timeout handling (no crash on UND_ERR_CONNECT_TIMEOUT).' },
+        { type: 'FIX', desc: 'Embeds: Removed footer text for cleaner timestamp display.' },
+        { type: 'FIX', desc: 'Interaction: Timeout-resilient safe handlers with followUp fallback.' },
         { type: 'PERF', desc: 'REST: Extended timeout 30s + auto-retry for VPS latency.' },
-        { type: 'PERF', desc: 'Loop: Overlap guard + staggered 5s delays to prevent API burst.' },
-        { type: 'FIX', desc: 'Logs: Suppressed spam (ban-cache, retry, network blips).' }
+        { type: 'PERF', desc: 'Loop: Overlap guard + staggered delays to prevent API burst.' }
     ]
 };
 
@@ -370,7 +370,6 @@ async function updateDatabaseEmbed(productId) {
         .setDescription(`Monitoring stock entries for product ID: \`${productId}\`${isMaint ? '\n⚠️ **Status:** `MAINTENANCE MODE ACTIVE` - Purchases are blocked.' : ''}`)
         .setColor(isMaint ? '#e67e22' : '#C29C1D')
         .addFields(...fields)
-        .setFooter({ text: `QUANTUMBLOX DATABASE SYSTEM • ${productId}`.slice(0, 2048) })
         .setTimestamp();
 
     if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
@@ -836,7 +835,6 @@ async function updateVersionDashboard() {
                 { name: 'Platform', value: `\`${process.platform}\``, inline: true },
                 { name: 'Memory', value: `\`${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB\``, inline: true }
             )
-            .setFooter({ text: `QUANTUMBLOX STORE v${BOT_VERSION.version}` })
             .setTimestamp();
 
         const config = loadConfig();
@@ -881,7 +879,6 @@ client.on('guildMemberAdd', async member => {
                         { name: 'User', value: `${member.user.tag} (\`${member.user.id}\`)`, inline: true },
                         { name: 'Account Created', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true }
                     )
-                    .setFooter({ text: `Total Members: ${member.guild.memberCount}` })
                     .setTimestamp();
                 await channel.send({ embeds: [embed] }).catch(() => { });
             }
@@ -906,7 +903,6 @@ client.on('guildMemberRemove', async member => {
                         { name: 'User', value: `${member.user.tag} (\`${member.user.id}\`)`, inline: true },
                         { name: 'Joined Server', value: member.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'Unknown', inline: true }
                     )
-                    .setFooter({ text: `Total Members: ${member.guild.memberCount}` })
                     .setTimestamp();
                 await channel.send({ embeds: [embed] }).catch(() => { });
             }
@@ -945,7 +941,6 @@ async function updateHoneypotWarning() {
                 { name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
                 { name: '🛡️ Total User Banned', value: `\`${bannedCount}\``, inline: true }
             )
-            .setFooter({ text: 'System Security Enforcement' })
             .setTimestamp();
 
         const msg = await getOrCreateDashboardMessage(channel, 'honeypotMessageId', ['Honeypot Protection']);
@@ -1031,8 +1026,10 @@ async function safeReply(interaction, options) {
         }
         return await interaction.reply(options);
     } catch (e) {
-        if (e.code === 10062) return; // Interaction expired, skip
-        console.warn('[SAFE-REPLY] Error:', e.message);
+        if (e.code === 10062) return;
+        if (e.code === 'UND_ERR_CONNECT_TIMEOUT' || e.message?.includes('Connect Timeout')) return;
+        // Fallback: try followUp if reply/editReply both failed
+        try { return await interaction.followUp({ ...options, flags: [MessageFlags.Ephemeral] }); } catch { /* exhausted */ }
     }
 }
 
@@ -1041,21 +1038,16 @@ async function safeDefer(interaction, ephemeral = true) {
         if (interaction.deferred || interaction.replied) return;
         await interaction.deferReply({ flags: ephemeral ? [MessageFlags.Ephemeral] : [] });
     } catch (e) {
-        if (e.code === 10062) return;
-        console.warn('[SAFE-DEFER] Error:', e.message);
+        if (e.code === 10062 || e.message?.includes('Connect Timeout')) return;
     }
 }
 
 async function safeModal(interaction, modal) {
     try {
-        if (interaction.deferred || interaction.replied) {
-            console.warn('[SAFE-MODAL] Cannot show modal after defer/reply');
-            return;
-        }
+        if (interaction.deferred || interaction.replied) return;
         await interaction.showModal(modal);
     } catch (e) {
-        if (e.code === 10062) return;
-        console.warn('[SAFE-MODAL] Error:', e.message);
+        if (e.code === 10062 || e.message?.includes('Connect Timeout')) return;
     }
 }
 
@@ -1067,8 +1059,7 @@ async function safeUpdate(interaction, options) {
         }
         return await interaction.update(options);
     } catch (e) {
-        if (e.code === 10062) return;
-        console.warn('[SAFE-UPDATE] Error:', e.message);
+        if (e.code === 10062 || e.message?.includes('Connect Timeout')) return;
     }
 }
 
@@ -1078,8 +1069,7 @@ async function safeDeferUpdate(interaction) {
         if (interaction.deferred || interaction.replied) return;
         return await interaction.deferUpdate();
     } catch (e) {
-        if (e.code === 10062) return;
-        console.warn('[SAFE-DEFER-UPDATE] Error:', e.message);
+        if (e.code === 10062 || e.message?.includes('Connect Timeout')) return;
     }
 }
 
@@ -1396,7 +1386,6 @@ client.on('interactionCreate', async interaction => {
                                 { name: '💰 Total Amount', value: `\`${fmt}\``, inline: true },
                                 { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
                             )
-                            .setFooter({ text: `QUANTUMBLOX ${isAuction ? 'AUCTION' : 'STORE'} • Elite Fulfillment` })
                             .setTimestamp();
                         await safeReply(interaction, { embeds: [confirmEmbed] });
 
@@ -1416,7 +1405,7 @@ client.on('interactionCreate', async interaction => {
                                             { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Final Amount', value: `**${fmt}**`, inline: true },
                                             { name: 'Status', value: '`COMPLETED`', inline: true }
-                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
+                                        ).setTimestamp()]
                                     }).catch(() => { });
                                     if (deliveryChan) deliveryChan.send({
                                         embeds: [new EmbedBuilder().setTitle('AUCTION DELIVERY LOG').setColor('#e17055').addFields(
@@ -1424,7 +1413,7 @@ client.on('interactionCreate', async interaction => {
                                             { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
                                             { name: 'Product', value: `\`${pay.product_id}\``, inline: true },
                                             { name: 'Status', value: '`Check your DM for product delivery`', inline: false }
-                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
+                                        ).setTimestamp()]
                                     }).catch(() => { });
                                 } else {
                                     const [histChan, payChan] = await Promise.all([
@@ -1439,7 +1428,7 @@ client.on('interactionCreate', async interaction => {
                                             { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Total', value: fmt, inline: true },
                                             { name: 'Process', value: 'Automatic', inline: true }
-                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
+                                        ).setTimestamp()]
                                     }).catch(() => { });
                                     if (payChan) payChan.send({
                                         embeds: [new EmbedBuilder().setTitle('Payment Received').setColor('#0984e3').addFields(
@@ -1448,7 +1437,7 @@ client.on('interactionCreate', async interaction => {
                                             { name: 'Qty', value: `${pay.qty}x`, inline: true },
                                             { name: 'Total', value: fmt, inline: true },
                                             { name: 'Status', value: 'Completed', inline: true }
-                                        ).setFooter({ text: `QUANTUMBLOX STORE \u2022 ${orderId}` }).setTimestamp()]
+                                        ).setTimestamp()]
                                     }).catch(() => { });
                                 }
                             } catch (logErr) { console.warn('[LOG] Fire-and-forget logging error:', logErr.message); }
@@ -1948,7 +1937,7 @@ client.on('interactionCreate', async interaction => {
                                 { name: 'Total Paid', value: fmt, inline: true },
                                 { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
                             )
-                            .setFooter({ text: 'QUANTUMBLOX STORE — Thank you for your purchase.' }).setTimestamp()
+                            .setTimestamp()
                         ]
                     }).catch(() => { });
                 }
@@ -1966,7 +1955,7 @@ client.on('interactionCreate', async interaction => {
                                 { name: 'Total', value: fmt, inline: true },
                                 { name: 'Process', value: 'Manual', inline: true }
                             )
-                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` }).setTimestamp()
+                            .setTimestamp()
                         ]
                     }).catch(() => { });
                 }
@@ -1984,7 +1973,7 @@ client.on('interactionCreate', async interaction => {
                                 { name: 'Total', value: fmt, inline: true },
                                 { name: 'Status', value: 'Completed (Manual)', inline: true }
                             )
-                            .setFooter({ text: `QUANTUMBLOX STORE • ${inv}` }).setTimestamp()
+                            .setTimestamp()
                         ]
                     }).catch(() => { });
                 }
@@ -2103,7 +2092,7 @@ client.on('interactionCreate', async interaction => {
                             { name: 'Status', value: '`Awaiting Payment`', inline: true }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
-                        .setFooter({ text: 'QUANTUMBLOX STORE' }).setTimestamp()
+                        .setTimestamp()
                     ],
                     components: [new ActionRowBuilder().addComponents(
                         new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
