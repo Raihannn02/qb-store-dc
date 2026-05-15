@@ -129,14 +129,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.4.0',
-    codename: 'Clean Embed',
+    version: '3.5.0',
+    codename: 'Turbo Cache',
     date: 'May 16, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Embeds: Removed footer text for cleaner timestamp display.' },
-        { type: 'FIX', desc: 'Interaction: Timeout-resilient safe handlers with followUp fallback.' },
-        { type: 'PERF', desc: 'REST: Extended timeout 30s + auto-retry for VPS latency.' },
-        { type: 'PERF', desc: 'Loop: Overlap guard + staggered delays to prevent API burst.' }
+        { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' },
+        { type: 'PERF', desc: 'Debounce: Dashboard/embed refresh debounced to prevent spam.' },
+        { type: 'PERF', desc: 'Parallel: Reduced blocking awaits in interaction handlers.' },
+        { type: 'FIX', desc: 'Loop: Change-detection skip for unchanged dashboard data.' }
     ]
 };
 
@@ -145,6 +145,28 @@ const BOT_VERSION = {
 // ─────────────────────────────────────────────────────────────
 
 let AUCTION_CACHE = { active: false, name: '' };
+
+// ── Product Cache (30s TTL) ──
+let _productCache = { data: null, ts: 0 };
+const PRODUCT_CACHE_TTL = 30000;
+async function getCachedProducts() {
+    if (_productCache.data && (Date.now() - _productCache.ts) < PRODUCT_CACHE_TTL) return _productCache.data;
+    const { data } = await supabase.from('products').select('*').order('name');
+    if (data) { _productCache = { data, ts: Date.now() }; }
+    return data || _productCache.data || [];
+}
+function invalidateProductCache() { _productCache.ts = 0; }
+
+// ── Debounce Utility ──
+const _debounceTimers = new Map();
+function debounce(key, fn, delayMs = 2000) {
+    if (_debounceTimers.has(key)) clearTimeout(_debounceTimers.get(key));
+    _debounceTimers.set(key, setTimeout(() => { _debounceTimers.delete(key); fn().catch(() => {}); }, delayMs));
+}
+
+// ── Dashboard Change Detection ──
+let _lastDashboardHash = '';
+let _lastAuctionHash = '';
 
 // In-memory ban cache for ultra-fast (0ms) interaction security
 const banCache = new Map();
@@ -433,10 +455,16 @@ async function registerCommands() {
 async function updateDashboard() {
     await withLock('dashboard', async () => {
         const config = loadConfig();
-        const { data: allProducts, error } = await supabase.from('products').select('*').order('name');
-        if (error || !config || !allProducts) return;
+        const allProducts = await getCachedProducts();
+        if (!config || !allProducts) return;
 
         const products = allProducts.filter(p => !isAuctionProduct(p));
+
+        // Change detection: skip API call if data unchanged
+        const hash = products.map(p => `${p.id}:${p.stock}:${p.price}`).join('|');
+        if (hash === _lastDashboardHash) return;
+        _lastDashboardHash = hash;
+
         const channel = await client.channels.fetch(config.channelId).catch(() => null);
         if (!channel) return;
 
@@ -768,7 +796,7 @@ async function updateStockDashboard() {
         const channel = await client.channels.fetch(stockChannelId).catch(() => null);
         if (!channel) return;
 
-        const { data: allProducts } = await supabase.from('products').select('*').order('name');
+        const allProducts = await getCachedProducts();
         const products = (allProducts || []).filter(p => isAuctionProduct(p));
 
         const embed = new EmbedBuilder()
@@ -1113,17 +1141,15 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isButton()) {
             // ── btn_buy ───────────────────────────────────────
             if (interaction.customId === 'btn_buy') {
-                // Already deferred at top
-
-                // Parallelize user check and products fetch
-                const [userRes, productsRes] = await Promise.all([
+                // Parallelize user check and cached products fetch
+                const [userRes, allProducts] = await Promise.all([
                     supabase.from('users').select('id').eq('id', interaction.user.id).single(),
-                    supabase.from('products').select('*').order('name')
+                    getCachedProducts()
                 ]);
 
                 if (!userRes.data) return safeReply(interaction, { content: '❌ Please register first by clicking the **Register** button.' });
 
-                const products = (productsRes.data || []).filter(p => !isAuctionProduct(p));
+                const products = (allProducts || []).filter(p => !isAuctionProduct(p));
                 const config = loadConfig();
                 if (!products || products.length === 0) return safeReply(interaction, { content: '❌ No products available at the moment.' });
 
@@ -1348,6 +1374,7 @@ client.on('interactionCreate', async interaction => {
                         const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
                         await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
                         await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
+                        invalidateProductCache();
 
                         const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
                         const isAuction = pay.invoice_id.startsWith('AUC');
@@ -1613,8 +1640,8 @@ client.on('interactionCreate', async interaction => {
 
                 await safeReply(interaction, { content: `✅ Product \`${pid}\` has been permanently deleted (including related pending orders).`, components: [] });
 
-                // Small delay to ensure DB sync before dashboard update
-                setTimeout(() => updateDashboard(), 1500);
+                invalidateProductCache();
+                debounce('dashboard', () => updateDashboard());
                 return;
             }
 
@@ -1877,7 +1904,8 @@ client.on('interactionCreate', async interaction => {
                 if (updateErr) return safeReply(interaction, { content: `❌ Failed to update product: ${updateErr.message}` });
 
                 await safeReply(interaction, { content: `✅ Product \`${pid}\` updated!` });
-                updateDashboard();
+                invalidateProductCache();
+                debounce('dashboard', () => updateDashboard());
                 return;
             }
 
@@ -2016,8 +2044,9 @@ client.on('interactionCreate', async interaction => {
                 await supabase.from('products').update({ stock: count.length }).eq('id', pid);
 
                 await safeReply(interaction, { content: `✅ Added ${lines.length} item(s). Total stock: ${count.length}` });
+                invalidateProductCache();
                 updateDatabaseEmbed(pid);
-                updateDashboard();
+                debounce('dashboard', () => updateDashboard());
                 return;
             }
 
@@ -2121,7 +2150,8 @@ client.on('interactionCreate', async interaction => {
 
                 if (insErr) return safeReply(interaction, { content: `❌ Failed to create product: ${insErr.message}` });
                 await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
-                updateStockDashboard();
+                invalidateProductCache();
+                debounce('stockDash', () => updateStockDashboard());
                 return;
             }
 
@@ -2348,6 +2378,8 @@ client.once('clientReady', async () => {
                 if (_loopRunning) { console.warn('[LOOP] Previous cycle still running — skipping.'); return; }
                 _loopRunning = true;
                 try {
+                    // Invalidate cache to get fresh data from Supabase
+                    invalidateProductCache();
                     // Staggered 5s delays between API calls to prevent burst/timeout
                     await updateDashboard().catch(() => { });
                     await new Promise(r => setTimeout(r, 5000));
