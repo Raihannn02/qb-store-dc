@@ -53,14 +53,23 @@ function formatStockRow(s, index) {
     return `**${index + 1}.** \`${content}\` • <t:${ts}:R>`;
 }
 
-async function withRetry(fn, attempts = 3, delayMs = 2000) {
+async function withRetry(fn, attempts = 3, delayMs = 3000) {
     for (let i = 0; i < attempts; i++) {
         try { return await fn(); }
         catch (err) {
+            const isTimeout = err.code === 'UND_ERR_CONNECT_TIMEOUT' || err.message?.includes('Connect Timeout');
             const last = i === attempts - 1;
-            console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message}${last ? ' — giving up.' : ' — retrying...'}`);
-            if (!last) await new Promise(r => setTimeout(r, delayMs));
-            else throw err;
+            if (isTimeout && !last) {
+                const backoff = delayMs * (i + 1);
+                console.warn(`[RETRY] Timeout on attempt ${i + 1}/${attempts} — waiting ${backoff}ms...`);
+                await new Promise(r => setTimeout(r, backoff));
+            } else if (!last) {
+                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message} — retrying...`);
+                await new Promise(r => setTimeout(r, delayMs));
+            } else {
+                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message} — giving up.`);
+                throw err;
+            }
         }
     }
 }
@@ -75,11 +84,25 @@ function refreshPresence() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PROCESS ERROR HANDLERS
+// PROCESS ERROR HANDLERS (Resilient — no crash on timeout)
 // ─────────────────────────────────────────────────────────────
 
-process.on('unhandledRejection', err => console.error('Unhandled Promise Rejection:', err));
-process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
+process.on('unhandledRejection', err => {
+    const msg = err?.message || String(err);
+    if (msg.includes('Connect Timeout') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('getaddrinfo')) {
+        console.warn(`[NET] Transient connection error (suppressed): ${msg}`);
+        return; // Don't crash on network blips
+    }
+    console.error('Unhandled Promise Rejection:', err);
+});
+process.on('uncaughtException', err => {
+    const msg = err?.message || String(err);
+    if (msg.includes('Connect Timeout') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('getaddrinfo')) {
+        console.warn(`[NET] Transient exception (suppressed): ${msg}`);
+        return; // Don't crash on network blips
+    }
+    console.error('Uncaught Exception:', err);
+});
 
 // ─────────────────────────────────────────────────────────────
 // DISCORD CLIENT
@@ -91,7 +114,11 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers
-    ]
+    ],
+    rest: {
+        timeout: 30000,    // 30s REST timeout (default 15s too aggressive for VPS)
+        retries: 2         // Auto-retry failed REST requests
+    }
 });
 
 const configPath = path.join(__dirname, 'config.json');
@@ -102,14 +129,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.3.0',
-    codename: 'Clean Presence',
+    version: '3.3.1',
+    codename: 'Stable VPS',
     date: 'May 16, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Presence: Auto-refresh after reconnect, reboot & gateway reset.' },
-        { type: 'FIX', desc: 'Logs: Restored Qty field in History Log & Payment Log.' },
-        { type: 'FIX', desc: 'Auction: Shortened Order ID format (AUC{timestamp}).' },
-        { type: 'SYS', desc: 'Embeds: Consistent styling across all log channels.' }
+        { type: 'FIX', desc: 'Network: Resilient timeout handling (no crash on UND_ERR_CONNECT_TIMEOUT).' },
+        { type: 'PERF', desc: 'REST: Extended timeout 30s + auto-retry for VPS latency.' },
+        { type: 'PERF', desc: 'Loop: Overlap guard + staggered 5s delays to prevent API burst.' },
+        { type: 'FIX', desc: 'Logs: Suppressed spam (ban-cache, retry, network blips).' }
     ]
 };
 
@@ -121,13 +148,20 @@ let AUCTION_CACHE = { active: false, name: '' };
 
 // In-memory ban cache for ultra-fast (0ms) interaction security
 const banCache = new Map();
+let _lastBanCount = -1;
 async function refreshBanCache() {
     try {
         const { data } = await supabase.from('banned_users').select('id, reason');
         banCache.clear();
         if (data) data.forEach(b => banCache.set(b.id, b.reason || 'Violation of terms'));
-        console.log(`[BAN-CACHE] Refreshed: ${banCache.size} banned users cached.`);
-    } catch (e) { console.warn('[BAN-CACHE] Refresh failed:', e.message); }
+        // Only log when count changes to avoid spam
+        if (banCache.size !== _lastBanCount) {
+            console.log(`[BAN-CACHE] Updated: ${banCache.size} banned users cached.`);
+            _lastBanCount = banCache.size;
+        }
+    } catch (e) {
+        if (!e.message?.includes('Connect Timeout')) console.warn('[BAN-CACHE] Refresh failed:', e.message);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2313,29 +2347,37 @@ client.once('clientReady', async () => {
         }
 
         const config = loadConfig();
-        const interval = Math.max(60000, config.updateInterval || 60000); // 60s optimized for VPS stability
+        const interval = Math.max(90000, config.updateInterval || 90000); // 90s for VPS stability
+
+        // Overlap guard — prevents concurrent refresh cycles from stacking
+        let _loopRunning = false;
 
         // Wait for initial syncs to settle before starting loop
         setTimeout(() => {
             console.log(`[LOOP] Starting background refresh every ${interval / 1000}s...`);
             setInterval(async () => {
+                if (_loopRunning) { console.warn('[LOOP] Previous cycle still running — skipping.'); return; }
+                _loopRunning = true;
                 try {
-                    // Update sequentially with slight delays to avoid Supabase/Discord pooling limits
+                    // Staggered 5s delays between API calls to prevent burst/timeout
                     await updateDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 2000));
+                    await new Promise(r => setTimeout(r, 5000));
                     await updateStockDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 2000));
+                    await new Promise(r => setTimeout(r, 5000));
                     await updateAuctionDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 2000));
-                    updateVersionDashboard().catch(() => { });
-                    checkAuctionDeadlines();
-                    checkAuctionSettlements();
-                    updateHoneypotWarning();
-                    refreshBanCache().catch(() => { }); // Keep ban cache in sync
-                    refreshPresence(); // Maintain presence across reconnects
-                } catch (e) { console.error('[LOOP] Failure in refresh cycle:', e.message); }
+                    await new Promise(r => setTimeout(r, 5000));
+                    await updateVersionDashboard().catch(() => { });
+                    await new Promise(r => setTimeout(r, 3000));
+                    await checkAuctionDeadlines().catch(() => { });
+                    await checkAuctionSettlements().catch(() => { });
+                    await updateHoneypotWarning().catch(() => { });
+                    await refreshBanCache().catch(() => { });
+                    refreshPresence();
+                } catch (e) {
+                    if (!e.message?.includes('Connect Timeout')) console.error('[LOOP] Failure in refresh cycle:', e.message);
+                } finally { _loopRunning = false; }
             }, interval);
-        }, 15000);
+        }, 20000);
     } catch (e) {
         console.error('[FATAL] Readiness failed:', e);
     }
