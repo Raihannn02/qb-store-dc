@@ -129,14 +129,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.5.2',
-    codename: 'Config Sync',
+    version: '3.6.0',
+    codename: 'Single Source',
     date: 'May 16, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Dashboard: Config changes (title/desc/color) now reflect immediately.' },
-        { type: 'FIX', desc: 'Database: Fixed duplicate embed on restart (re-use saved message_id).' },
-        { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' },
-        { type: 'PERF', desc: 'Debounce: Dashboard/embed refresh debounced to prevent spam.' }
+        { type: 'FIX', desc: 'Config: Removed config.json from git to prevent VPS overwrite.' },
+        { type: 'FIX', desc: 'Dashboard: Find existing embed by saved message ID, not title.' },
+        { type: 'FIX', desc: 'Dashboard: Config changes reflect immediately without duplicate.' },
+        { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' }
     ]
 };
 
@@ -523,15 +523,43 @@ async function updateDashboard() {
             new ButtonBuilder().setCustomId('btn_admin_settings').setLabel('Setting').setStyle(ButtonStyle.Secondary)
         );
 
-        const targetTitle = config.embed?.title || 'Shop Dashboard';
-        const msg = await getOrCreateDashboardMessage(channel, 'dashboardMessageId', [targetTitle]);
-        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[DASHBOARD] Edit failed:', e.message));
-        else {
-            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[DASHBOARD] Send failed:', e.message));
-            if (nMsg) {
-                config.dashboardMessageId = nMsg.id;
-                saveConfig(config);
+        // 1. Try saved message ID first (fastest, most reliable)
+        const savedId = config.dashboardMessageId;
+        if (savedId) {
+            try {
+                const existingMsg = await channel.messages.fetch(savedId);
+                if (existingMsg && existingMsg.author.id === client.user.id) {
+                    await withRetry(() => existingMsg.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                    return;
+                }
+            } catch (e) {
+                if (e.code === 10008 || e.status === 404) {
+                    config.dashboardMessageId = null;
+                    saveConfig(config);
+                }
             }
+        }
+
+        // 2. Fallback: search for any bot message with buttons (Register/Buy/Setting)
+        try {
+            const msgs = await channel.messages.fetch({ limit: 50 });
+            const found = msgs.find(m => {
+                if (m.author.id !== client.user.id) return false;
+                return m.components?.length > 0 && m.embeds?.length > 0;
+            });
+            if (found) {
+                config.dashboardMessageId = found.id;
+                saveConfig(config);
+                await withRetry(() => found.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                return;
+            }
+        } catch { /* search failed */ }
+
+        // 3. No existing message — create new
+        const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[DASHBOARD] Send failed:', e.message));
+        if (nMsg) {
+            config.dashboardMessageId = nMsg.id;
+            saveConfig(config);
         }
     });
 }
