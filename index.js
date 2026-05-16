@@ -129,12 +129,12 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.5.1',
-    codename: 'No Duplicate',
+    version: '3.5.2',
+    codename: 'Config Sync',
     date: 'May 16, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Dashboard: Config changes (title/desc/color) now reflect immediately.' },
         { type: 'FIX', desc: 'Database: Fixed duplicate embed on restart (re-use saved message_id).' },
-        { type: 'FIX', desc: 'Startup: Sequential sync with dedup cleanup for DB monitors.' },
         { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' },
         { type: 'PERF', desc: 'Debounce: Dashboard/embed refresh debounced to prevent spam.' }
     ]
@@ -489,12 +489,13 @@ async function updateDashboard() {
 
         const products = allProducts.filter(p => !isAuctionProduct(p));
 
-        // Change detection: skip API call if data unchanged
-        const hash = products.map(p => `${p.id}:${p.stock}:${p.price}`).join('|');
+        // Change detection: skip API call if data AND config unchanged
+        const configHash = `${config.embed?.title}|${config.embed?.description}|${config.embed?.color}`;
+        const hash = configHash + '||' + products.map(p => `${p.id}:${p.stock}:${p.price}`).join('|');
         if (hash === _lastDashboardHash) return;
         _lastDashboardHash = hash;
 
-        const channel = await client.channels.fetch(config.channelId).catch(() => null);
+        const channel = await client.channels.fetch(process.env.LIVE_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
         if (!channel) return;
 
         const embed = new EmbedBuilder()
@@ -1953,8 +1954,9 @@ client.on('interactionCreate', async interaction => {
                 if (!isNaN(newIntv)) config.updateInterval = Math.max(5000, newIntv);
 
                 saveConfig(config);
+                _lastDashboardHash = ''; // Force refresh on next updateDashboard
                 await safeReply(interaction, { content: '✅ Dashboard configuration updated!' });
-                updateDashboard();
+                await updateDashboard();
                 return;
             }
 
