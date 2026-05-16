@@ -53,6 +53,55 @@ function formatStockRow(s, index) {
     return `**${index + 1}.** \`${content}\` • <t:${ts}:R>`;
 }
 
+// ─────────────────────────────────────────────────────────────
+// CUSTOM EMOJI SYSTEM
+// ─────────────────────────────────────────────────────────────
+
+const DEFAULT_EMOJI = {
+    liveStock: {
+        title: '', lastUpdate: '⏱️', product: '🛒', stock: '📦',
+        price: '💰', format: '📋', info: '📝', id: '🆔'
+    },
+    auction: {
+        title: '⚖️', statusActive: '🟢', statusInactive: '🛑',
+        product: '📦', description: '📝', standing: '📊',
+        endTime: '⏳', history: '📈', rules: '⚖️', lastUpdate: '🔄',
+        highest: '🏆', bidder: '👤', remaining: '⏳'
+    }
+};
+
+const EMOJI_LABELS = {
+    liveStock: {
+        title: 'Title Emoji', lastUpdate: 'Last Update', product: 'Product Name',
+        stock: 'Stock', price: 'Price', format: 'Format', info: 'Info', id: 'ID'
+    },
+    auction: {
+        title: 'Title Emoji', statusActive: 'Status Active', statusInactive: 'Status Inactive',
+        product: 'Product Info', description: 'Description', standing: 'Current Standing',
+        endTime: 'End Time', history: 'Bid History', rules: 'Rules', lastUpdate: 'Last Update',
+        highest: 'Highest Bid', bidder: 'Bidder', remaining: 'Remaining'
+    }
+};
+
+function getEmoji(system, key) {
+    const config = loadConfig();
+    const custom = config.customEmoji?.[system]?.[key];
+    if (custom && custom.trim().length > 0) return custom.trim();
+    return DEFAULT_EMOJI[system]?.[key] || '';
+}
+
+function isValidEmoji(str) {
+    if (!str || str.trim().length === 0) return true; // empty = reset to default
+    const s = str.trim();
+    // Discord custom emoji: <:name:id> or <a:name:id>
+    if (/^<a?:\w+:\d+>$/.test(s)) return true;
+    // Unicode emoji (broad match: emoji-like chars, 1-8 codepoints)
+    // Allow common emoji ranges including modifiers, ZWJ sequences
+    const emojiRegex = /^(\p{Emoji_Presentation}|\p{Emoji}\uFE0F|\p{Emoji_Modifier_Base}\p{Emoji_Modifier}?|[\u200d\uFE0F])+$/u;
+    if (emojiRegex.test(s) && s.length <= 20) return true;
+    return false;
+}
+
 async function withRetry(fn, attempts = 3, delayMs = 3000) {
     for (let i = 0; i < attempts; i++) {
         try { return await fn(); }
@@ -129,14 +178,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.6.0',
-    codename: 'Single Source',
-    date: 'May 16, 2026',
+    version: '3.7.0',
+    codename: 'Custom Emoji',
+    date: 'May 17, 2026',
     changelog: [
-        { type: 'FIX', desc: 'Config: Removed config.json from git to prevent VPS overwrite.' },
-        { type: 'FIX', desc: 'Dashboard: Find existing embed by saved message ID, not title.' },
-        { type: 'FIX', desc: 'Dashboard: Config changes reflect immediately without duplicate.' },
-        { type: 'PERF', desc: 'Cache: In-memory product cache (30s TTL) for instant interaction.' }
+        { type: 'NEW', desc: 'Emoji: Set Custom Emoji for Live Stock Dashboard via Settings.' },
+        { type: 'NEW', desc: 'Emoji: Set Custom Emoji for Auction Dashboard via Settings.' },
+        { type: 'NEW', desc: 'Emoji: Support Unicode, Custom Discord, and Animated emoji.' },
+        { type: 'NEW', desc: 'Emoji: Validation with fallback to default on empty input.' }
     ]
 };
 
@@ -489,14 +538,18 @@ async function updateDashboard() {
 
         const products = allProducts.filter(p => !isAuctionProduct(p));
 
-        // Change detection: skip API call if data AND config unchanged
-        const configHash = `${config.embed?.title}|${config.embed?.description}|${config.embed?.color}`;
+        // Change detection: skip API call if data AND config AND emoji unchanged
+        const emojiHash = JSON.stringify(config.customEmoji?.liveStock || {});
+        const configHash = `${config.embed?.title}|${config.embed?.description}|${config.embed?.color}|${emojiHash}`;
         const hash = configHash + '||' + products.map(p => `${p.id}:${p.stock}:${p.price}`).join('|');
         if (hash === _lastDashboardHash) return;
         _lastDashboardHash = hash;
 
         const channel = await client.channels.fetch(process.env.PW_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
         if (!channel) return;
+
+        // Dynamic emoji from config with fallback
+        const eLS = (key) => getEmoji('liveStock', key);
 
         const embed = new EmbedBuilder()
             .setTitle(config.embed?.title || 'Shop Dashboard')
@@ -506,12 +559,12 @@ async function updateDashboard() {
 
         if (config.embed?.thumbnail) embed.setThumbnail(config.embed.thumbnail);
         const unixTime = Math.floor(Date.now() / 1000);
-        const fields = [{ name: '⏱️ Last Update', value: `<t:${unixTime}:R>`, inline: false }];
+        const fields = [{ name: `${eLS('lastUpdate')} Last Update`, value: `<t:${unixTime}:R>`, inline: false }];
         products.forEach(p => {
             const isMaint = config.maintenance?.[p.id] || false;
             fields.push({
-                name: `🛒 ${p.name.toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`,
-                value: `>>> 📦 **Stock:** \`${p.stock}\`\n💰 **Price:** \`${p.price}\`\n📋 **Format:** \`${p.format}\`\n📝 **Info:** ${p.description}\n🆔 **ID:** ||${p.id}||`,
+                name: `${eLS('product')} ${p.name.toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`,
+                value: `>>> ${eLS('stock')} **Stock:** \`${p.stock}\`\n${eLS('price')} **Price:** \`${p.price}\`\n${eLS('format')} **Format:** \`${p.format}\`\n${eLS('info')} **Info:** ${p.description}\n${eLS('id')} **ID:** ||${p.id}||`,
                 inline: false
             });
         });
@@ -583,13 +636,16 @@ async function updateAuctionDashboard() {
         AUCTION_CACHE.active = !!auction;
         AUCTION_CACHE.name = auction ? auction.name : '';
 
+        // Dynamic emoji from config with fallback
+        const eAU = (key) => getEmoji('auction', key);
+
         const embed = new EmbedBuilder()
-            .setTitle('⚖️  AUCTION SYSTEM DASHBOARD')
+            .setTitle(`${eAU('title')}  AUCTION SYSTEM DASHBOARD`)
             .setColor('#2b2d31')
             .setTimestamp();
 
         if (!auction) {
-            embed.setDescription('🛑 **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.')
+            embed.setDescription(`${eAU('statusInactive')} **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.`)
                 .addFields({ name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
         } else {
             const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
@@ -601,22 +657,22 @@ async function updateAuctionDashboard() {
                 .order('amount', { ascending: false })
                 .limit(11);
 
-            let standingText = `🏆 **Highest Bid:** ${formatPrice(auction.current_bid)}\n👤 **Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n⏳ **Remaining:** <t:${unixEnd}:R>`;
+            let standingText = `${eAU('highest')} **Highest Bid:** ${formatPrice(auction.current_bid)}\n${eAU('bidder')} **Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n${eAU('remaining')} **Remaining:** <t:${unixEnd}:R>`;
 
             let historyText = '*No previous bids recorded.*';
             if (bids && bids.length > 1) {
                 historyText = bids.slice(1).map((b, i) => `**#${i + 2}** <@${b.user_id}> — **${formatPrice(b.amount)}**`).join('\n');
             }
 
-            embed.setDescription(`🟢 **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
+            embed.setDescription(`${eAU('statusActive')} **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
                 .setFields(
-                    { name: '📦 Product Information', value: `**Name:** \`${auction.name}\`\n**Category:** \`${auction.category_name || 'Digital'}\`\n**Product ID:** \`${auction.product_id || '-'}\``, inline: false },
-                    { name: '📝 Description', value: `${auction.description || 'No description provided.'}`, inline: false },
-                    { name: '📊 Current Standing', value: standingText, inline: true },
-                    { name: '⏳ End Time', value: `<t:${unixEnd}:F>`, inline: true },
-                    { name: '📈 Bid History (Top 10)', value: historyText, inline: false },
-                    { name: '⚖️ Auction Rules', value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic **PERMANENT BAN**.\n• Settlement: Winner must finalize payment within **1 hour**.`, inline: false },
-                    { name: '🔄 Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                    { name: `${eAU('product')} Product Information`, value: `**Name:** \`${auction.name}\`\n**Category:** \`${auction.category_name || 'Digital'}\`\n**Product ID:** \`${auction.product_id || '-'}\``, inline: false },
+                    { name: `${eAU('description')} Description`, value: `${auction.description || 'No description provided.'}`, inline: false },
+                    { name: `${eAU('standing')} Current Standing`, value: standingText, inline: true },
+                    { name: `${eAU('endTime')} End Time`, value: `<t:${unixEnd}:F>`, inline: true },
+                    { name: `${eAU('history')} Bid History (Top 10)`, value: historyText, inline: false },
+                    { name: `${eAU('rules')} Auction Rules`, value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic **PERMANENT BAN**.\n• Settlement: Winner must finalize payment within **1 hour**.`, inline: false },
+                    { name: `${eAU('lastUpdate')} Last Update`, value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
                 );
         }
 
@@ -1167,7 +1223,7 @@ client.on('interactionCreate', async interaction => {
     try {
         // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
         // Determine if we should defer (Buttons/Menus) or skip (Modals)
-        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick'];
+        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick'];
         const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
@@ -1240,7 +1296,8 @@ client.on('interactionCreate', async interaction => {
                         { label: 'Maintenance Status', description: 'Enable/disable maintenance for products', value: 'opt_maintenance', emoji: '🛠️' },
                         { label: 'Delete Product', description: 'Remove a product from the shop', value: 'opt_del_p', emoji: '🗑️' },
                         { label: 'Manual Confirm Pay', description: 'Force fulfill an order by ID', value: 'opt_manual_pay', emoji: '✅' },
-                        { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' }
+                        { label: 'Config Dashboard', description: 'Change title, color, or description', value: 'opt_config', emoji: '⚙️' },
+                        { label: 'Set Custom Emoji', description: 'Change dashboard emoji/icons', value: 'opt_custom_emoji', emoji: '🎨' }
                     ]);
 
                 return safeReply(interaction, {
@@ -1295,7 +1352,8 @@ client.on('interactionCreate', async interaction => {
                         { label: 'Add Product', description: 'Register new product to database', value: 'opt_add_category', emoji: '🏷️' },
                         { label: 'Edit Product', description: 'Modify existing product in database', value: 'opt_edit_category', emoji: '✏️' },
                         { label: 'Delete Product', description: 'Permanently remove product from database', value: 'opt_delete_category', emoji: '🗑️' },
-                        { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' }
+                        { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' },
+                        { label: 'Set Custom Emoji', description: 'Change auction dashboard emoji', value: 'opt_custom_emoji_auction', emoji: '🎨' }
                     ]);
 
                 return safeReply(interaction, {
@@ -1645,6 +1703,27 @@ client.on('interactionCreate', async interaction => {
                     return safeModal(interaction, modal);
                 }
 
+                if (choice === 'opt_custom_emoji') {
+                    // Already deferred at top
+                    const keys = Object.keys(DEFAULT_EMOJI.liveStock);
+                    const config = loadConfig();
+                    const menu = new StringSelectMenuBuilder()
+                        .setCustomId('sel_emoji_ls_pick')
+                        .setPlaceholder('Select emoji to customize...')
+                        .addOptions(keys.map(k => {
+                            const current = config.customEmoji?.liveStock?.[k] || DEFAULT_EMOJI.liveStock[k] || '(none)';
+                            return {
+                                label: EMOJI_LABELS.liveStock[k] || k,
+                                description: `Current: ${current}`,
+                                value: k
+                            };
+                        }));
+                    return safeReply(interaction, {
+                        content: '🎨 **Set Custom Emoji — Live Stock Dashboard**\nSelect which emoji you want to change:',
+                        components: [new ActionRowBuilder().addComponents(menu)]
+                    });
+                }
+
                 return;
             }
 
@@ -1815,6 +1894,29 @@ client.on('interactionCreate', async interaction => {
                     all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Cat: ${p.category_name || '—'}`, value: p.id }));
                     return safeReply(interaction, { content: '🗑️ **Delete Product**\nSelect a product to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
+
+                if (choice === 'opt_custom_emoji_auction') {
+                    // Already deferred at top
+                    const keys = Object.keys(DEFAULT_EMOJI.auction);
+                    const config = loadConfig();
+                    // Split into 2 pages if keys > 25 (Discord limit), but we have 13 keys so it's fine
+                    const menu = new StringSelectMenuBuilder()
+                        .setCustomId('sel_emoji_auc_pick')
+                        .setPlaceholder('Select emoji to customize...')
+                        .addOptions(keys.map(k => {
+                            const current = config.customEmoji?.auction?.[k] || DEFAULT_EMOJI.auction[k] || '(none)';
+                            return {
+                                label: EMOJI_LABELS.auction[k] || k,
+                                description: `Current: ${current}`,
+                                value: k
+                            };
+                        }));
+                    return safeReply(interaction, {
+                        content: '🎨 **Set Custom Emoji — Auction Dashboard**\nSelect which emoji you want to change:',
+                        components: [new ActionRowBuilder().addComponents(menu)]
+                    });
+                }
+
                 return;
             }
 
@@ -1899,6 +2001,42 @@ client.on('interactionCreate', async interaction => {
                 updateStockDashboard();
                 return;
             }
+            // ── sel_emoji_ls_pick ────────────────────────────
+            if (interaction.customId === 'sel_emoji_ls_pick') {
+                const key = interaction.values[0];
+                const config = loadConfig();
+                const current = config.customEmoji?.liveStock?.[key] || DEFAULT_EMOJI.liveStock[key] || '';
+                const modal = new ModalBuilder().setCustomId(`mod_emoji_ls_${key}`).setTitle(`🎨 Set Emoji: ${EMOJI_LABELS.liveStock[key] || key}`);
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('emoji')
+                        .setLabel('New Emoji (leave empty for default)')
+                        .setValue(current)
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                        .setMaxLength(50)
+                ));
+                return await safeModal(interaction, modal);
+            }
+
+            // ── sel_emoji_auc_pick ───────────────────────────
+            if (interaction.customId === 'sel_emoji_auc_pick') {
+                const key = interaction.values[0];
+                const config = loadConfig();
+                const current = config.customEmoji?.auction?.[key] || DEFAULT_EMOJI.auction[key] || '';
+                const modal = new ModalBuilder().setCustomId(`mod_emoji_auc_${key}`).setTitle(`🎨 Set Emoji: ${EMOJI_LABELS.auction[key] || key}`);
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('emoji')
+                        .setLabel('New Emoji (leave empty for default)')
+                        .setValue(current)
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                        .setMaxLength(50)
+                ));
+                return await safeModal(interaction, modal);
+            }
+
             console.warn(`[WARN] Unhandled select menu interaction: ${interaction.customId}`);
             if (!interaction.deferred && !interaction.replied) {
                 await safeReply(interaction, { content: '❌ Select menu handler not found.', flags: [MessageFlags.Ephemeral] });
@@ -1985,6 +2123,78 @@ client.on('interactionCreate', async interaction => {
                 _lastDashboardHash = ''; // Force refresh on next updateDashboard
                 await safeReply(interaction, { content: '✅ Dashboard configuration updated!' });
                 await updateDashboard();
+                return;
+            }
+
+            // ── mod_emoji_ls_ ─────────────────────────────────
+            if (interaction.customId.startsWith('mod_emoji_ls_')) {
+                await safeDefer(interaction);
+                const key = interaction.customId.replace('mod_emoji_ls_', '');
+                const emojiInput = interaction.fields.getTextInputValue('emoji')?.trim() || '';
+
+                // Validate
+                if (emojiInput.length > 0 && !isValidEmoji(emojiInput)) {
+                    return safeReply(interaction, {
+                        content: `❌ **Invalid emoji:** \`${emojiInput}\`\n\nSupported formats:\n• Unicode emoji (e.g. 🎮 ⭐ 🛒)\n• Discord custom emoji (e.g. \`<:name:id>\`)\n• Animated emoji (e.g. \`<a:name:id>\`)\n• Leave empty to reset to default.`
+                    });
+                }
+
+                const config = loadConfig();
+                if (!config.customEmoji) config.customEmoji = {};
+                if (!config.customEmoji.liveStock) config.customEmoji.liveStock = {};
+
+                if (emojiInput.length === 0) {
+                    delete config.customEmoji.liveStock[key];
+                } else {
+                    config.customEmoji.liveStock[key] = emojiInput;
+                }
+
+                saveConfig(config);
+                _lastDashboardHash = ''; // Force refresh
+
+                const displayEmoji = emojiInput || DEFAULT_EMOJI.liveStock[key] || '(default)';
+                await safeReply(interaction, {
+                    content: `✅ Emoji for **${EMOJI_LABELS.liveStock[key] || key}** updated to: ${displayEmoji}`
+                });
+
+                // Fire-and-forget dashboard update
+                updateDashboard().catch(() => {});
+                return;
+            }
+
+            // ── mod_emoji_auc_ ────────────────────────────────
+            if (interaction.customId.startsWith('mod_emoji_auc_')) {
+                await safeDefer(interaction);
+                const key = interaction.customId.replace('mod_emoji_auc_', '');
+                const emojiInput = interaction.fields.getTextInputValue('emoji')?.trim() || '';
+
+                // Validate
+                if (emojiInput.length > 0 && !isValidEmoji(emojiInput)) {
+                    return safeReply(interaction, {
+                        content: `❌ **Invalid emoji:** \`${emojiInput}\`\n\nSupported formats:\n• Unicode emoji (e.g. 🎮 ⭐ ⚖️)\n• Discord custom emoji (e.g. \`<:name:id>\`)\n• Animated emoji (e.g. \`<a:name:id>\`)\n• Leave empty to reset to default.`
+                    });
+                }
+
+                const config = loadConfig();
+                if (!config.customEmoji) config.customEmoji = {};
+                if (!config.customEmoji.auction) config.customEmoji.auction = {};
+
+                if (emojiInput.length === 0) {
+                    delete config.customEmoji.auction[key];
+                } else {
+                    config.customEmoji.auction[key] = emojiInput;
+                }
+
+                saveConfig(config);
+                _lastAuctionHash = ''; // Force refresh
+
+                const displayEmoji = emojiInput || DEFAULT_EMOJI.auction[key] || '(default)';
+                await safeReply(interaction, {
+                    content: `✅ Emoji for **${EMOJI_LABELS.auction[key] || key}** updated to: ${displayEmoji}`
+                });
+
+                // Fire-and-forget dashboard update
+                updateAuctionDashboard().catch(() => {});
                 return;
             }
 
