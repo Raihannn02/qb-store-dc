@@ -495,7 +495,7 @@ async function updateDashboard() {
         if (hash === _lastDashboardHash) return;
         _lastDashboardHash = hash;
 
-        const channel = await client.channels.fetch(process.env.LIVE_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
+        const channel = await client.channels.fetch(process.env.PW_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
         if (!channel) return;
 
         const embed = new EmbedBuilder()
