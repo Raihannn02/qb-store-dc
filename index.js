@@ -335,7 +335,7 @@ async function updateDatabaseEmbed(productId) {
         const config = loadConfig();
         const msgId = config.monitorMessages?.[productId] || config[`monitor_${productId}`];
         if (msgId) {
-            const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
+            const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
             const channel = await client.channels.fetch(dbChannelId).catch(() => null);
             if (channel) {
                 const msg = await channel.messages.fetch(msgId).catch(() => null);
@@ -353,8 +353,8 @@ async function updateDatabaseEmbed(productId) {
 
     const config = loadConfig();
     const isAuction = isAuctionProduct(product);
-    // Removed STOCK_MANAGEMENT_CHANNEL_ID to prevent duplication with the Stock Management System embed.
-    const dbChannelId = process.env.DATABASE_CHANNEL_ID || config.dashboardChannelId;
+    // Removed PRODUCT_BID_CHANNEL_ID to prevent duplication with the Stock Management System embed.
+    const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
 
     if (!dbChannelId) { console.warn(`[DB EMBED] Channel ID not set for product: ${productId}`); return; }
 
@@ -820,8 +820,8 @@ async function checkAuctionSettlements() {
 async function updateStockDashboard() {
     await withLock('stock', async () => {
         const config = loadConfig();
-        const stockChannelId = process.env.STOCK_MANAGEMENT_CHANNEL_ID;
-        if (!stockChannelId) { console.warn('[STOCK] STOCK_MANAGEMENT_CHANNEL_ID not set.'); return; }
+        const stockChannelId = process.env.PRODUCT_BID_CHANNEL_ID;
+        if (!stockChannelId) { console.warn('[STOCK] PRODUCT_BID_CHANNEL_ID not set.'); return; }
 
         const channel = await client.channels.fetch(stockChannelId).catch(() => null);
         if (!channel) return;
