@@ -123,12 +123,18 @@ async function withRetry(fn, attempts = 3, delayMs = 3000) {
     }
 }
 
-function refreshPresence() {
+let _lastPresenceRefresh = 0;
+const PRESENCE_THROTTLE_MS = 300000; // 5 min minimum between refreshes
+
+function refreshPresence(force = false) {
+    const now = Date.now();
+    if (!force && (now - _lastPresenceRefresh) < PRESENCE_THROTTLE_MS) return;
     try {
         client.user.setPresence({
             activities: [{ name: 'QUANTUMBLOX STORE', type: ActivityType.Watching }],
             status: 'online'
         });
+        _lastPresenceRefresh = now;
     } catch (e) { console.warn('[PRESENCE] Refresh failed:', e.message); }
 }
 
@@ -178,15 +184,17 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.8.0',
+    version: '3.8.1',
     codename: 'Unified Monitor',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all Live Stock products in 1 embed.' },
         { type: 'NEW', desc: 'Monitor: Product selector for Add/Edit/Delete Stock actions.' },
-        { type: 'NEW', desc: 'Monitor: Auto-migration cleanup of old per-product embeds on startup.' },
-        { type: 'FIX', desc: 'Monitor: Eliminated duplicate monitor messages in #product-pw.' },
-        { type: 'SYSTEM', desc: 'Monitor: Parallel stock fetch for faster embed rendering.' }
+        { type: 'FIX', desc: 'Loop: Timeout protection (120s) prevents stuck/hanging cycles.' },
+        { type: 'FIX', desc: 'Loop: Reduced stagger delays for faster refresh cycles.' },
+        { type: 'FIX', desc: 'Loop: Migration runs once and is saved to config.' },
+        { type: 'FIX', desc: 'Presence: Throttled to prevent gateway spam (5min cooldown).' },
+        { type: 'SYSTEM', desc: 'Loop: Auto-recovery on frozen cycles with force-unlock.' }
     ]
 };
 
@@ -499,15 +507,22 @@ async function updateUnifiedMonitor() {
     });
 }
 
-// Backward compatibility: legacy per-product calls route to unified monitor
+// Backward compatibility: legacy per-product calls route to unified monitor (debounced)
 async function updateDatabaseEmbed(_productId) {
-    return updateUnifiedMonitor();
+    debounce('unified_monitor', () => updateUnifiedMonitor(), 1500);
 }
 
-// Migration: clean up old per-product monitor messages
+// Migration: clean up old per-product monitor messages (runs once, saved to config)
 async function migrateToUnifiedMonitor() {
-    console.log('[MIGRATION] Migrating to unified monitor...');
     const config = loadConfig();
+
+    // Skip if migration already completed
+    if (config.migrationCompleted === 'unified_v3.8') {
+        console.log('[MIGRATION] Already completed — skipping.');
+        return;
+    }
+
+    console.log('[MIGRATION] Migrating to unified monitor...');
     const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
     if (!dbChannelId) return;
 
@@ -549,13 +564,14 @@ async function migrateToUnifiedMonitor() {
         }
     } catch { /* scan failed */ }
 
-    // Clear old config keys
+    // Clear old config keys & mark migration complete
     delete config.monitorMessages;
     for (const key of Object.keys(config)) {
         if (key.startsWith('monitor_')) delete config[key];
     }
+    config.migrationCompleted = 'unified_v3.8';
     saveConfig(config);
-    console.log('[MIGRATION] Migration complete.');
+    console.log('[MIGRATION] Migration complete — flagged as done.');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2737,12 +2753,12 @@ client.once('clientReady', async () => {
     try {
         console.log(`[READY] Bot is online as ${client.user.tag}`);
         console.log(`[INTENTS] Guilds, GuildMessages, MessageContent, GuildMembers are ACTIVE.`);
-        refreshPresence();
+        refreshPresence(true); // Force on startup
 
-        // Auto-refresh presence after gateway reconnect/resume
+        // Auto-refresh presence after gateway reconnect/resume (throttled)
         client.on('shardResume', () => {
             console.log('[PRESENCE] Gateway resumed — refreshing presence...');
-            refreshPresence();
+            refreshPresence(true);
         });
 
         await checkSchemaSupport();
@@ -2758,7 +2774,7 @@ client.once('clientReady', async () => {
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
         await refreshBanCache(); // Load banned users into memory for 0ms lookups
 
-        // Migrate old per-product monitors to unified monitor (one-time cleanup)
+        // Migrate old per-product monitors to unified monitor (one-time, saved to config)
         await migrateToUnifiedMonitor().catch(e => console.warn('[READY] Migration failed:', e.message));
         // Create/update unified database monitor
         await updateUnifiedMonitor().catch(e => console.warn('[READY] Unified monitor failed:', e.message));
@@ -2766,28 +2782,43 @@ client.once('clientReady', async () => {
 
         const config = loadConfig();
         const interval = Math.max(90000, config.updateInterval || 90000); // 90s for VPS stability
+        const CYCLE_TIMEOUT_MS = 120000; // 120s max per cycle — force-unlock if stuck
 
-        // Overlap guard — prevents concurrent refresh cycles from stacking
+        // Overlap guard with timeout protection
         let _loopRunning = false;
+        let _loopStartedAt = 0;
 
         // Wait for initial syncs to settle before starting loop
         setTimeout(() => {
-            console.log(`[LOOP] Starting background refresh every ${interval / 1000}s...`);
+            console.log(`[LOOP] Starting background refresh every ${interval / 1000}s (timeout: ${CYCLE_TIMEOUT_MS / 1000}s)...`);
             setInterval(async () => {
-                if (_loopRunning) { console.warn('[LOOP] Previous cycle still running — skipping.'); return; }
+                // Auto-recovery: force-unlock if previous cycle exceeded timeout
+                if (_loopRunning) {
+                    const elapsed = Date.now() - _loopStartedAt;
+                    if (elapsed > CYCLE_TIMEOUT_MS) {
+                        console.warn(`[LOOP] Previous cycle stuck for ${Math.round(elapsed / 1000)}s — force unlocking.`);
+                        _loopRunning = false;
+                    } else {
+                        return; // Still within timeout, skip silently
+                    }
+                }
                 _loopRunning = true;
+                _loopStartedAt = Date.now();
                 try {
                     // Invalidate cache to get fresh data from Supabase
                     invalidateProductCache();
-                    // Staggered 5s delays between API calls to prevent burst/timeout
+
+                    // Staggered 1s delays between API calls (reduced from 5s)
                     await updateDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 5000));
+                    await new Promise(r => setTimeout(r, 1000));
+                    await updateUnifiedMonitor().catch(() => { });
+                    await new Promise(r => setTimeout(r, 1000));
                     await updateStockDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 5000));
+                    await new Promise(r => setTimeout(r, 1000));
                     await updateAuctionDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 5000));
+                    await new Promise(r => setTimeout(r, 1000));
                     await updateVersionDashboard().catch(() => { });
-                    await new Promise(r => setTimeout(r, 3000));
+                    await new Promise(r => setTimeout(r, 1000));
                     await checkAuctionDeadlines().catch(() => { });
                     await checkAuctionSettlements().catch(() => { });
                     await updateHoneypotWarning().catch(() => { });
@@ -2795,7 +2826,11 @@ client.once('clientReady', async () => {
                     refreshPresence();
                 } catch (e) {
                     if (!e.message?.includes('Connect Timeout')) console.error('[LOOP] Failure in refresh cycle:', e.message);
-                } finally { _loopRunning = false; }
+                } finally {
+                    _loopRunning = false;
+                    const duration = Date.now() - _loopStartedAt;
+                    if (duration > 30000) console.log(`[LOOP] Cycle completed in ${Math.round(duration / 1000)}s`);
+                }
             }, interval);
         }, 20000);
     } catch (e) {
