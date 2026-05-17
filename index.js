@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.9.1',
-    codename: 'Counting Track',
+    version: '4.0.0',
+    codename: 'Sold Archive',
     date: 'May 18, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Counting: Realtime server statistics in #count-track.' },
-        { type: 'NEW', desc: 'Counting: Total Members, Total Customers, Total Sold.' },
-        { type: 'FIX', desc: 'Counting: Total Sold now scans history log for real data.' },
-        { type: 'FIX', desc: 'Counting: Accumulated Qty from all completed orders.' },
-        { type: 'SYSTEM', desc: 'Counting: One-time scan on startup, cached for performance.' }
+        { type: 'NEW', desc: 'Sold Data: Search panel for admin to lookup sold products.' },
+        { type: 'NEW', desc: 'Sold Data: Archive all sold items to database permanently.' },
+        { type: 'NEW', desc: 'Sold Data: Search by Order ID, Product, Buyer, Content.' },
+        { type: 'NEW', desc: 'Counting: Realtime server stats with history log sync.' },
+        { type: 'SYSTEM', desc: 'Database: Auto-create sold_archive table on startup.' }
     ]
 };
 
@@ -323,6 +323,41 @@ async function checkSchemaSupport() {
         }
     } catch {
         console.warn('[SCHEMA] Failed to verify system_type support. Using fallback.');
+    }
+
+    // Ensure sold_archive table exists (auto-create via RPC or test query)
+    try {
+        const { error } = await supabase.from('sold_archive').select('id').limit(1);
+        if (error && error.code === '42P01') {
+            console.warn('[SCHEMA] sold_archive table not found. Please create it in Supabase Dashboard.');
+            console.warn('[SCHEMA] SQL: CREATE TABLE sold_archive (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, order_id text, product_id text, product_name text, buyer_id text, buyer_tag text, content text, qty int DEFAULT 1, amount numeric DEFAULT 0, sold_at timestamptz DEFAULT now());');
+        } else {
+            console.log('[SCHEMA] sold_archive table ready.');
+        }
+    } catch {
+        console.warn('[SCHEMA] Could not verify sold_archive table.');
+    }
+}
+
+// Archive sold stock items to sold_archive table
+async function archiveSoldData({ orderId, productId, productName, buyerId, buyerTag, items, qty, amount }) {
+    try {
+        const rows = items.map(content => ({
+            order_id: orderId,
+            product_id: productId,
+            product_name: productName || productId,
+            buyer_id: buyerId,
+            buyer_tag: buyerTag || 'Unknown',
+            content: content,
+            qty: 1,
+            amount: Math.round(amount / qty),
+            sold_at: new Date().toISOString()
+        }));
+        const { error } = await supabase.from('sold_archive').insert(rows);
+        if (error) console.warn('[SOLD] Archive insert failed:', error.message);
+        else console.log(`[SOLD] Archived ${rows.length} items for order ${orderId}`);
+    } catch (e) {
+        console.warn('[SOLD] Archive error:', e.message);
     }
 }
 
@@ -1223,6 +1258,92 @@ async function updateCountingTrack() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// updateSoldDataDashboard (Search Panel)
+// ─────────────────────────────────────────────────────────────
+
+async function updateSoldDataDashboard() {
+    await withLock('sold_data', async () => {
+        const channelId = process.env.SOLD_DATA_CHANNEL_ID;
+        if (!channelId) return;
+
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel) return;
+
+        const config = loadConfig();
+
+        // Get total archived count
+        const { count } = await supabase.from('sold_archive').select('id', { count: 'exact', head: true }).catch(() => ({ count: 0 }));
+
+        const unixNow = Math.floor(Date.now() / 1000);
+
+        const embed = new EmbedBuilder()
+            .setTitle('QUANTUMBLOX STORE \u2014 Sold Data Archive')
+            .setColor('#2b2d31')
+            .setDescription(
+                `Search and lookup all sold product data.\n` +
+                `All completed transactions are permanently archived here.\n\n` +
+                `**Total Archived Records**\n` +
+                `\`\`\`${(count || 0).toLocaleString('id-ID')}\`\`\`\n` +
+                `**Search Criteria**\n` +
+                `\`\`\`\n` +
+                `Order ID    \u2014 Search by invoice/order ID\n` +
+                `Product ID  \u2014 Search by product identifier\n` +
+                `Buyer       \u2014 Search by buyer username\n` +
+                `Content     \u2014 Search by product data/content\n` +
+                `\`\`\``
+            )
+            .addFields(
+                { name: 'Last Update', value: `<t:${unixNow}:R>`, inline: true }
+            )
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('btn_search_sold').setLabel('Search Sold Data').setStyle(ButtonStyle.Primary)
+        );
+
+        // 1. Try saved message ID
+        const savedId = config.soldDataMessageId;
+        if (savedId) {
+            try {
+                const msg = await channel.messages.fetch(savedId);
+                if (msg && msg.author.id === client.user.id) {
+                    await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                    return;
+                }
+            } catch (e) {
+                if (e.code === 10008 || e.status === 404) {
+                    config.soldDataMessageId = null;
+                    saveConfig(config);
+                }
+            }
+        }
+
+        // 2. Search for existing
+        try {
+            const msgs = await channel.messages.fetch({ limit: 50 });
+            const found = msgs.find(m => {
+                if (m.author.id !== client.user.id || !m.embeds?.length) return false;
+                return m.embeds[0].title?.includes('Sold Data Archive');
+            });
+            if (found) {
+                config.soldDataMessageId = found.id;
+                saveConfig(config);
+                await withRetry(() => found.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                return;
+            }
+        } catch { /* search failed */ }
+
+        // 3. Create new
+        const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000)
+            .catch(e => console.error('[SOLD] Dashboard send failed:', e.message));
+        if (nMsg) {
+            config.soldDataMessageId = nMsg.id;
+            saveConfig(config);
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY & LEAVE ZONE
 // ─────────────────────────────────────────────────────────────
 
@@ -1514,6 +1635,20 @@ client.on('interactionCreate', async interaction => {
                 return safeReply(interaction, { components: [new ActionRowBuilder().addComponents(s)] });
             }
 
+            // ── btn_search_sold ──────────────────────────────
+            if (interaction.customId === 'btn_search_sold') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return safeReply(interaction, { content: '❌ Only admins can search sold data.', flags: [MessageFlags.Ephemeral] });
+
+                const modal = new ModalBuilder().setCustomId('mod_search_sold').setTitle('Search Sold Data');
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder().setCustomId('search_query').setLabel('Search Query').setStyle(TextInputStyle.Short).setPlaceholder('Order ID, Product ID, username, or content').setRequired(true).setMaxLength(200)
+                    )
+                );
+                return interaction.showModal(modal);
+            }
+
             // ── btn_admin_settings ────────────────────────────
             if (interaction.customId === 'btn_admin_settings') {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
@@ -1768,6 +1903,18 @@ client.on('interactionCreate', async interaction => {
                         await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
                         await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
                         invalidateProductCache();
+
+                        // Archive sold data for search
+                        archiveSoldData({
+                            orderId,
+                            productId: pay.product_id,
+                            productName: pay.product_id,
+                            buyerId: interaction.user.id,
+                            buyerTag: interaction.user.tag,
+                            items: deliver,
+                            qty: pay.qty,
+                            amount: pay.amount
+                        });
 
                         const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
                         const isAuction = pay.invoice_id.startsWith('AUC');
@@ -2379,6 +2526,51 @@ client.on('interactionCreate', async interaction => {
         // ═════════════════════════════════════════════════════
         if (interaction.isModalSubmit()) {
 
+            // ── mod_search_sold ────────────────────────────────
+            if (interaction.customId === 'mod_search_sold') {
+                await safeDefer(interaction);
+                const query = interaction.fields.getTextInputValue('search_query').trim();
+                if (!query) return safeReply(interaction, { content: '❌ Search query cannot be empty.' });
+
+                // Search across all relevant columns
+                const searchPattern = `%${query}%`;
+                const { data: results, error } = await supabase
+                    .from('sold_archive')
+                    .select('*')
+                    .or(`order_id.ilike.${searchPattern},product_id.ilike.${searchPattern},product_name.ilike.${searchPattern},buyer_tag.ilike.${searchPattern},buyer_id.ilike.${searchPattern},content.ilike.${searchPattern}`)
+                    .order('sold_at', { ascending: false })
+                    .limit(25);
+
+                if (error) return safeReply(interaction, { content: `❌ Search failed: ${error.message}` });
+                if (!results || results.length === 0) return safeReply(interaction, { content: `No results found for \`${query}\`.` });
+
+                // Build paginated results (max 10 per embed)
+                const pageSize = 10;
+                const pages = [];
+                for (let i = 0; i < results.length; i += pageSize) {
+                    const slice = results.slice(i, i + pageSize);
+                    const lines = slice.map((r, idx) => {
+                        const num = i + idx + 1;
+                        const date = r.sold_at ? new Date(r.sold_at).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) : '-';
+                        const contentPreview = r.content?.length > 40 ? r.content.substring(0, 40) + '...' : (r.content || '-');
+                        return `**${num}.** \`${r.order_id || '-'}\`\n` +
+                            `    Product: \`${r.product_id || '-'}\` | Buyer: \`${r.buyer_tag || '-'}\`\n` +
+                            `    Content: \`${contentPreview}\`\n` +
+                            `    Amount: \`Rp. ${(r.amount || 0).toLocaleString('id-ID')}\` | Date: \`${date}\``;
+                    }).join('\n\n');
+                    pages.push(lines);
+                }
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`Search Results \u2014 "${query}"`)
+                    .setColor('#2b2d31')
+                    .setDescription(pages[0])
+                    .setFooter({ text: `Showing ${Math.min(results.length, pageSize)} of ${results.length} results` })
+                    .setTimestamp();
+
+                return safeReply(interaction, { embeds: [embed] });
+            }
+
             // ── mod_p_add ─────────────────────────────────────
             if (interaction.customId === 'mod_p_add') {
                 const id = interaction.fields.getTextInputValue('id').trim().toUpperCase();
@@ -2548,6 +2740,18 @@ client.on('interactionCreate', async interaction => {
                 const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
                 await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
                 await supabase.from('pending_payments').delete().eq('invoice_id', inv);
+
+                // Archive sold data for search
+                archiveSoldData({
+                    orderId: inv,
+                    productId: pay.product_id,
+                    productName: pay.product_id,
+                    buyerId: pay.user_id,
+                    buyerTag: buyer?.tag || 'Unknown',
+                    items: items,
+                    qty: pay.qty,
+                    amount: pay.amount
+                });
 
                 const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
 
@@ -2970,6 +3174,10 @@ client.once('clientReady', async () => {
         await updateCountingTrack().catch(e => console.warn('[READY] Counting track failed:', e.message));
         console.log('[READY] Counting track synced.');
 
+        // Initialize sold data search panel
+        await updateSoldDataDashboard().catch(e => console.warn('[READY] Sold data dashboard failed:', e.message));
+        console.log('[READY] Sold data dashboard synced.');
+
         const config = loadConfig();
         const interval = Math.max(90000, config.updateInterval || 90000); // 90s for VPS stability
         const CYCLE_TIMEOUT_MS = 120000; // 120s max per cycle — force-unlock if stuck
@@ -3014,6 +3222,7 @@ client.once('clientReady', async () => {
                     await updateHoneypotWarning().catch(() => { });
                     await refreshBanCache().catch(() => { });
                     await updateCountingTrack().catch(() => { });
+                    await updateSoldDataDashboard().catch(() => { });
                     refreshPresence();
                 } catch (e) {
                     if (!e.message?.includes('Connect Timeout')) console.error('[LOOP] Failure in refresh cycle:', e.message);
