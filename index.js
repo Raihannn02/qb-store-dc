@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.0.2',
+    version: '4.0.3',
     codename: 'Sold Archive',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Sold Data: Search panel for admin to lookup sold products.' },
         { type: 'NEW', desc: 'Sold Data: Archive all sold items to database permanently.' },
-        { type: 'FIX', desc: 'Sold Data: Fixed modal trigger for search button.' },
-        { type: 'FIX', desc: 'Sold Data: Fixed Supabase query builder compatibility.' },
-        { type: 'SYSTEM', desc: 'Database: Auto-create sold_archive table on startup.' }
+        { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' },
+        { type: 'FIX', desc: 'Sold Data: Duplicate prevention via order_id check.' },
+        { type: 'SYSTEM', desc: 'Database: One-time history log scan for past transactions.' }
     ]
 };
 
@@ -359,6 +359,126 @@ async function archiveSoldData({ orderId, productId, productName, buyerId, buyer
     } catch (e) {
         console.warn('[SOLD] Archive error:', e.message);
     }
+}
+
+// One-time migration: scan history log and import past orders into sold_archive
+async function migrateSoldArchive() {
+    const config = loadConfig();
+    if (config.soldArchiveMigrated === 'v4.0') {
+        console.log('[SOLD] Archive migration already completed — skipping.');
+        return;
+    }
+
+    const historyChannelId = process.env.HISTORY_LOG_CHANNEL_ID;
+    if (!historyChannelId) return;
+
+    const channel = await client.channels.fetch(historyChannelId).catch(() => null);
+    if (!channel) return;
+
+    console.log('[SOLD] Starting archive migration from history log...');
+    let lastId = null;
+    let scanned = 0;
+    let imported = 0;
+    let skipped = 0;
+
+    while (true) {
+        const options = { limit: 100 };
+        if (lastId) options.before = lastId;
+
+        const messages = await channel.messages.fetch(options).catch(() => null);
+        if (!messages || messages.size === 0) break;
+
+        const batch = [];
+
+        for (const [, msg] of messages) {
+            if (msg.author.id !== client.user.id || !msg.embeds?.length) continue;
+            const embed = msg.embeds[0];
+            const title = embed.title || '';
+
+            if (title === 'Order Completed') {
+                const getField = (name) => embed.fields?.find(f => f.name === name)?.value || '';
+                const orderId = getField('Order ID').replace(/`/g, '').trim();
+                const productId = getField('Product').trim();
+                const buyerRaw = getField('Buyer');
+                const buyerId = buyerRaw.match(/<@(\d+)>/)?.[1] || '';
+                const qtyRaw = getField('Qty').replace(/\D/g, '');
+                const qty = parseInt(qtyRaw) || 1;
+                const totalRaw = getField('Total').replace(/[^0-9]/g, '');
+                const amount = parseInt(totalRaw) || 0;
+                const soldAt = msg.createdAt.toISOString();
+
+                if (!orderId) continue;
+
+                for (let i = 0; i < qty; i++) {
+                    batch.push({
+                        order_id: orderId,
+                        product_id: productId,
+                        product_name: productId,
+                        buyer_id: buyerId,
+                        buyer_tag: 'Historical',
+                        content: '(migrated from history log)',
+                        qty: 1,
+                        amount: qty > 0 ? Math.round(amount / qty) : amount,
+                        sold_at: soldAt
+                    });
+                }
+            }
+
+            if (title === 'AUCTION DELIVERY LOG') {
+                const getField = (name) => embed.fields?.find(f => f.name === name)?.value || '';
+                const orderId = getField('Order ID').replace(/`/g, '').trim();
+                const productId = getField('Product').replace(/`/g, '').trim();
+                const winnerRaw = getField('Winner');
+                const buyerId = winnerRaw.match(/<@(\d+)>/)?.[1] || '';
+                const soldAt = msg.createdAt.toISOString();
+
+                if (!orderId) continue;
+
+                batch.push({
+                    order_id: orderId,
+                    product_id: productId,
+                    product_name: productId,
+                    buyer_id: buyerId,
+                    buyer_tag: 'Historical (Auction)',
+                    content: '(migrated from history log)',
+                    qty: 1,
+                    amount: 0,
+                    sold_at: soldAt
+                });
+            }
+        }
+
+        // Insert batch with duplicate skip
+        if (batch.length > 0) {
+            for (const row of batch) {
+                // Check if order already exists
+                const { data: existing } = await supabase
+                    .from('sold_archive')
+                    .select('id')
+                    .eq('order_id', row.order_id)
+                    .eq('sold_at', row.sold_at)
+                    .limit(1);
+
+                if (existing && existing.length > 0) {
+                    skipped++;
+                    continue;
+                }
+
+                const { error } = await supabase.from('sold_archive').insert([row]);
+                if (!error) imported++;
+                else skipped++;
+            }
+        }
+
+        scanned += messages.size;
+        lastId = messages.last().id;
+
+        if (scanned >= 1000) break;
+    }
+
+    console.log(`[SOLD] Migration complete: scanned ${scanned} messages, imported ${imported} records, skipped ${skipped} duplicates.`);
+    config.soldArchiveMigrated = 'v4.0';
+    saveConfig(config);
 }
 
 async function safeInsertProduct(payload) {
@@ -3177,6 +3297,9 @@ client.once('clientReady', async () => {
         // Initialize counting track
         await updateCountingTrack().catch(e => console.warn('[READY] Counting track failed:', e.message));
         console.log('[READY] Counting track synced.');
+
+        // Migrate historical orders into sold_archive (one-time)
+        await migrateSoldArchive().catch(e => console.warn('[READY] Sold archive migration failed:', e.message));
 
         // Initialize sold data search panel
         await updateSoldDataDashboard().catch(e => console.warn('[READY] Sold data dashboard failed:', e.message));
