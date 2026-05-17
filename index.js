@@ -178,14 +178,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.7.0',
-    codename: 'Custom Emoji',
-    date: 'May 17, 2026',
+    version: '3.8.0',
+    codename: 'Unified Monitor',
+    date: 'May 18, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Emoji: Set Custom Emoji for Live Stock Dashboard via Settings.' },
-        { type: 'NEW', desc: 'Emoji: Set Custom Emoji for Auction Dashboard via Settings.' },
-        { type: 'NEW', desc: 'Emoji: Support Unicode, Custom Discord, and Animated emoji.' },
-        { type: 'NEW', desc: 'Emoji: Validation with fallback to default on empty input.' }
+        { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all Live Stock products in 1 embed.' },
+        { type: 'NEW', desc: 'Monitor: Product selector for Add/Edit/Delete Stock actions.' },
+        { type: 'NEW', desc: 'Monitor: Auto-migration cleanup of old per-product embeds on startup.' },
+        { type: 'FIX', desc: 'Monitor: Eliminated duplicate monitor messages in #product-pw.' },
+        { type: 'SYSTEM', desc: 'Monitor: Parallel stock fetch for faster embed rendering.' }
     ]
 };
 
@@ -366,154 +367,195 @@ function saveConfig(data) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// updateDatabaseEmbed
+// UNIFIED DATABASE MONITOR (v3.8.0)
+// All Live Stock products in one embed — replaces per-product embeds
 // ─────────────────────────────────────────────────────────────
 
-async function updateDatabaseEmbed(productId) {
-    console.log(`[DB EMBED] Updating embed for '${productId}'`);
-
-    const { data: product, error: prodError } = await supabase.from('products').select('*').eq('id', productId).single();
-    if (prodError || !product) {
-        console.error(`[DB EMBED] Product '${productId}' not found: ${prodError?.message}`);
-    }
-
-    if (isAuctionProduct(product)) {
-        console.log(`[DB EMBED] Skipping '${productId}' (Auction Product)`);
-
-        // Clean up legacy DB embed if it exists from before it was an auction
+async function updateUnifiedMonitor() {
+    await withLock('unified_monitor', async () => {
         const config = loadConfig();
-        const msgId = config.monitorMessages?.[productId] || config[`monitor_${productId}`];
-        if (msgId) {
-            const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
-            const channel = await client.channels.fetch(dbChannelId).catch(() => null);
-            if (channel) {
-                const msg = await channel.messages.fetch(msgId).catch(() => null);
-                if (msg) {
-                    await msg.delete().catch(() => { });
-                    console.log(`[DB EMBED] Cleared legacy Live Stock monitor for '${productId}'`);
+        const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
+        if (!dbChannelId) { console.warn('[UNIFIED] Channel ID not set.'); return; }
+
+        const channel = await client.channels.fetch(dbChannelId).catch(() => null);
+        if (!channel) { console.error('[UNIFIED] Channel not accessible.'); return; }
+
+        const allProducts = await getCachedProducts();
+        const products = (allProducts || []).filter(p => !isAuctionProduct(p));
+
+        // Fetch stock for all products in parallel
+        const stockResults = await Promise.all(
+            products.map(p =>
+                supabase.from('stock').select('*').eq('product_id', p.id)
+                    .order('created_at', { ascending: false })
+                    .then(r => ({ pid: p.id, stock: r.data || [] }))
+            )
+        );
+        const stockMap = {};
+        stockResults.forEach(r => { stockMap[r.pid] = r.stock; });
+
+        const unixNow = Math.floor(Date.now() / 1000);
+        const ITEMS_PER_PRODUCT = 5;
+
+        // Build embed
+        const hasMaint = products.some(p => config.maintenance?.[p.id]);
+        const embed = new EmbedBuilder()
+            .setTitle('🛡️ DATABASE MONITOR | PIXEL WORLD PRODUCTS')
+            .setColor(hasMaint ? '#e67e22' : '#C29C1D')
+            .setTimestamp();
+
+        if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
+
+        let description = '> Centralized stock monitoring for all Pixel World products.\n\n';
+        description += `⏱️ **Last Update:** <t:${unixNow}:R>\n`;
+
+        if (products.length === 0) {
+            description += '\n*No products found. Add a product via Settings.*';
+        } else {
+            for (const p of products) {
+                const isMaint = config.maintenance?.[p.id] || false;
+                const stock = stockMap[p.id] || [];
+                const statusEmoji = isMaint ? '🟠' : '🟢';
+                const statusText = isMaint ? 'MAINTENANCE' : 'ACTIVE';
+
+                description += `\n━━━ \`${p.id}\` ━━━\n`;
+                description += `📦 **${p.name.toUpperCase()}**${isMaint ? ' `[MAINTENANCE]`' : ''}\n`;
+                description += `> **Stock:** \`${stock.length}\` | **Status:** ${statusEmoji} \`${statusText}\`\n`;
+
+                if (stock.length === 0) {
+                    description += `> *No stock items found.*\n`;
+                } else {
+                    const shown = stock.slice(0, ITEMS_PER_PRODUCT);
+                    shown.forEach((s, i) => {
+                        const content = safeStr(s?.content, '[empty]').replaceAll('|', ', ');
+                        const ts = safeUnix(s?.created_at);
+                        description += `> **${i + 1}.** \`${content}\` • <t:${ts}:R>\n`;
+                    });
+                    if (stock.length > ITEMS_PER_PRODUCT) {
+                        description += `> *... and ${stock.length - ITEMS_PER_PRODUCT} more*\n`;
+                    }
                 }
             }
-            if (config.monitorMessages) delete config.monitorMessages[productId];
-            delete config[`monitor_${productId}`];
-            saveConfig(config);
         }
-        return;
-    }
 
-    const config = loadConfig();
-    const isAuction = isAuctionProduct(product);
-    // Removed PRODUCT_BID_CHANNEL_ID to prevent duplication with the Stock Management System embed.
-    const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
+        // Discord embed description limit is 4096 chars
+        if (description.length > 4096) {
+            description = description.slice(0, 4090) + '\n...';
+        }
 
-    if (!dbChannelId) { console.warn(`[DB EMBED] Channel ID not set for product: ${productId}`); return; }
+        embed.setDescription(description);
 
-    const channel = await client.channels.fetch(dbChannelId).catch(() => null);
-    if (!channel) { console.error(`[DB EMBED] Channel '${dbChannelId}' not accessible.`); return; }
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('btn_unified_add').setLabel('Add Stock').setEmoji('➕').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('btn_unified_edit').setLabel('Edit Stock').setEmoji('📝').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('btn_unified_del').setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
+        );
 
-    const { data: productStock, error: stockError } = await supabase.from('stock').select('*').eq('product_id', productId).order('created_at', { ascending: false });
-    if (stockError) { console.error(`[DB EMBED] Stock fetch error: ${stockError.message}`); return; }
-
-    const stockList = productStock ?? [];
-    let itemsValue;
-    if (stockList.length === 0) {
-        itemsValue = '*No stock items found in database.*';
-    } else {
-        const rows = stockList.slice(0, 15).map((s, i) => {
-            try { return formatStockRow(s, i); } catch { return null; }
-        }).filter(Boolean);
-        itemsValue = rows.join('\n') || '*Could not render stock items.*';
-        if (stockList.length > 15) itemsValue += `\n*... and ${stockList.length - 15} more*`;
-    }
-
-    const unixNow = Math.floor(Date.now() / 1000);
-    const fields = [
-        safeField('⏱️ Last Update', `<t:${unixNow}:R>`, false),
-        safeField('📊 Summary', `> **Total Items:** \`${stockList.length}\``, false),
-        safeField('📦 Available Items', itemsValue, false),
-    ].filter(Boolean);
-
-    if (fields.length === 0) { console.error(`[DB EMBED] No valid fields for '${productId}'.`); return; }
-
-    const isMaint = config.maintenance?.[productId] || false;
-
-    const embed = new EmbedBuilder()
-        .setTitle(`🛡️ DATABASE MONITOR | ${safeStr(product.name, productId).toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`.slice(0, 256))
-        .setDescription(`Monitoring stock entries for product ID: \`${productId}\`${isMaint ? '\n⚠️ **Status:** `MAINTENANCE MODE ACTIVE` - Purchases are blocked.' : ''}`)
-        .setColor(isMaint ? '#e67e22' : '#C29C1D')
-        .addFields(...fields)
-        .setTimestamp();
-
-    if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
-
-    try {
-        await withLock(`db_embed_${productId}`, async () => {
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId(`btn_db_add_${productId}`).setLabel('Add Stock').setEmoji('➕').setStyle(ButtonStyle.Success),
-                new ButtonBuilder().setCustomId(`btn_db_edit_pick_${productId}`).setLabel('Edit Stock').setEmoji('📝').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`btn_db_del_pick_${productId}`).setLabel('Delete Stock').setEmoji('🗑️').setStyle(ButtonStyle.Danger)
-            );
-
-            const config = loadConfig();
-            if (!config.monitorMessages) config.monitorMessages = {};
-
-            // 1. Try saved message ID from config (fastest path)
-            const savedMsgId = config.monitorMessages[productId] || config[`monitor_${productId}`];
-            if (savedMsgId) {
-                try {
-                    const existingMsg = await channel.messages.fetch(savedMsgId);
-                    if (existingMsg && existingMsg.author.id === client.user.id) {
-                        await withRetry(() => existingMsg.edit({ embeds: [embed], components: [row] }), 3, 3000);
-                        return;
-                    }
-                } catch (e) {
-                    if (e.code === 10008 || e.status === 404) {
-                        // Message deleted, clear from config
-                        delete config.monitorMessages[productId];
-                        delete config[`monitor_${productId}`];
-                        saveConfig(config);
-                    }
-                }
-            }
-
-            // 2. Fallback: search channel for existing embed with this product ID in description
+        // 1. Try saved unified monitor message ID
+        const savedId = config.unifiedMonitorId;
+        if (savedId) {
             try {
-                const msgs = await channel.messages.fetch({ limit: 100 });
-                const matches = msgs.filter(m => {
-                    if (m.author.id !== client.user.id || !m.embeds?.length) return false;
-                    const desc = m.embeds[0].description || '';
-                    const title = m.embeds[0].title || '';
-                    return desc.includes(productId) && title.includes('DATABASE MONITOR');
-                });
-
-                if (matches.size > 0) {
-                    const primary = matches.first();
-                    // Save to config for next time
-                    config.monitorMessages[productId] = primary.id;
-                    config[`monitor_${productId}`] = primary.id;
-                    saveConfig(config);
-                    // Delete duplicates
-                    for (const [id, m] of matches) {
-                        if (id !== primary.id) await m.delete().catch(() => { });
-                    }
-                    await withRetry(() => primary.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                const msg = await channel.messages.fetch(savedId);
+                if (msg && msg.author.id === client.user.id) {
+                    await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000);
                     return;
                 }
-            } catch { /* channel search failed, proceed to create */ }
-
-            // 3. No existing embed found — create new one
-            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error(`[DB EMBED] Send failed for ${productId}:`, e.message));
-            if (nMsg) {
-                const cfg = loadConfig();
-                if (!cfg.monitorMessages) cfg.monitorMessages = {};
-                cfg.monitorMessages[productId] = nMsg.id;
-                cfg[`monitor_${productId}`] = nMsg.id;
-                saveConfig(cfg);
+            } catch (e) {
+                if (e.code === 10008 || e.status === 404) {
+                    config.unifiedMonitorId = null;
+                    saveConfig(config);
+                }
             }
-        });
-        console.log(`[DB EMBED] Embed updated for '${productId}'`);
-    } catch (err) {
-        console.error(`[DB EMBED] Embed update failed for '${productId}': ${err.message}`);
+        }
+
+        // 2. Search for existing unified monitor
+        try {
+            const msgs = await channel.messages.fetch({ limit: 100 });
+            const matches = msgs.filter(m => {
+                if (m.author.id !== client.user.id || !m.embeds?.length) return false;
+                const title = m.embeds[0].title || '';
+                return title.includes('DATABASE MONITOR') && title.includes('PIXEL WORLD PRODUCTS');
+            });
+
+            if (matches.size > 0) {
+                const primary = matches.first();
+                config.unifiedMonitorId = primary.id;
+                saveConfig(config);
+                for (const [id, m] of matches) {
+                    if (id !== primary.id) await m.delete().catch(() => { });
+                }
+                await withRetry(() => primary.edit({ embeds: [embed], components: [row] }), 3, 3000);
+                return;
+            }
+        } catch { /* search failed */ }
+
+        // 3. Create new
+        const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000)
+            .catch(e => console.error('[UNIFIED] Send failed:', e.message));
+        if (nMsg) {
+            config.unifiedMonitorId = nMsg.id;
+            saveConfig(config);
+        }
+    });
+}
+
+// Backward compatibility: legacy per-product calls route to unified monitor
+async function updateDatabaseEmbed(_productId) {
+    return updateUnifiedMonitor();
+}
+
+// Migration: clean up old per-product monitor messages
+async function migrateToUnifiedMonitor() {
+    console.log('[MIGRATION] Migrating to unified monitor...');
+    const config = loadConfig();
+    const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
+    if (!dbChannelId) return;
+
+    const channel = await client.channels.fetch(dbChannelId).catch(() => null);
+    if (!channel) return;
+
+    // Collect old message IDs
+    const oldIds = new Set();
+    if (config.monitorMessages) {
+        for (const [, msgId] of Object.entries(config.monitorMessages)) {
+            if (msgId) oldIds.add(msgId);
+        }
     }
+    for (const [key, val] of Object.entries(config)) {
+        if (key.startsWith('monitor_') && val) oldIds.add(val);
+    }
+
+    // Delete old per-product messages
+    for (const msgId of oldIds) {
+        try {
+            const msg = await channel.messages.fetch(msgId);
+            if (msg && msg.author.id === client.user.id) {
+                await msg.delete();
+                console.log(`[MIGRATION] Deleted old monitor: ${msgId}`);
+            }
+        } catch { /* already gone */ }
+    }
+
+    // Scan for any remaining old-style DATABASE MONITOR embeds (not unified)
+    try {
+        const msgs = await channel.messages.fetch({ limit: 100 });
+        for (const [id, msg] of msgs) {
+            if (msg.author.id !== client.user.id || !msg.embeds?.length) continue;
+            const title = msg.embeds[0].title || '';
+            if (title.includes('DATABASE MONITOR') && !title.includes('PIXEL WORLD PRODUCTS')) {
+                await msg.delete().catch(() => { });
+                console.log(`[MIGRATION] Deleted legacy monitor embed: ${id}`);
+            }
+        }
+    } catch { /* scan failed */ }
+
+    // Clear old config keys
+    delete config.monitorMessages;
+    for (const key of Object.keys(config)) {
+        if (key.startsWith('monitor_')) delete config[key];
+    }
+    saveConfig(config);
+    console.log('[MIGRATION] Migration complete.');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1223,7 +1265,7 @@ client.on('interactionCreate', async interaction => {
     try {
         // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
         // Determine if we should defer (Buttons/Menus) or skip (Modals)
-        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick'];
+        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
         const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
@@ -1362,7 +1404,52 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
-            // ── btn_db_add_ ───────────────────────────────────
+            // ── btn_unified_add ────────────────────────────────
+            if (interaction.customId === 'btn_unified_add') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
+                const allProducts = await getCachedProducts();
+                const products = (allProducts || []).filter(p => !isAuctionProduct(p));
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_add_pick').setPlaceholder('Select a product to add stock to...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return safeReply(interaction, { content: '📦 **Add Stock**\nSelect the target product:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_unified_edit ───────────────────────────────
+            if (interaction.customId === 'btn_unified_edit') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
+                const allProducts = await getCachedProducts();
+                const products = (allProducts || []).filter(p => !isAuctionProduct(p));
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_edit_pick').setPlaceholder('Select a product to edit stock...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return safeReply(interaction, { content: '✏️ **Edit Stock**\nSelect the product whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_unified_del ────────────────────────────────
+            if (interaction.customId === 'btn_unified_del') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
+                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+
+                const allProducts = await getCachedProducts();
+                const products = (allProducts || []).filter(p => !isAuctionProduct(p));
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_del_pick').setPlaceholder('Select a product to delete stock from...');
+                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
+
+                return safeReply(interaction, { content: '🗑️ **Delete Stock**\nSelect the product whose stock you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_db_add_ (legacy backward compat) ──────────
             // NOTE: showModal cannot be called after deferReply
             if (interaction.customId.startsWith('btn_db_add_')) {
                 if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
@@ -1780,6 +1867,53 @@ client.on('interactionCreate', async interaction => {
                 invalidateProductCache();
                 debounce('dashboard', () => updateDashboard());
                 return;
+            }
+
+            // ── sel_unified_add_pick ─────────────────────────────
+            if (interaction.customId === 'sel_unified_add_pick') {
+                const pid = interaction.values[0];
+                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Add Stock', pid));
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('data')
+                        .setLabel('Stock Data (one entry per line)')
+                        .setPlaceholder('UsernameSteam|PasswordSteam|EmailAcc|PasswordAcc')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setRequired(true)
+                ));
+                return await safeModal(interaction, modal);
+            }
+
+            // ── sel_unified_edit_pick ────────────────────────────
+            if (interaction.customId === 'sel_unified_edit_pick') {
+                const pid = interaction.values[0];
+                // Already deferred at top
+
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to edit for this product.' });
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId(`sel_db_edit_${pid}`)
+                    .setPlaceholder('Select an entry to edit...');
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
+
+                return safeReply(interaction, { content: `✏️ Editing stock for \`${pid}\`. Select an entry:`, components: [new ActionRowBuilder().addComponents(select)] });
+            }
+
+            // ── sel_unified_del_pick ─────────────────────────────
+            if (interaction.customId === 'sel_unified_del_pick') {
+                const pid = interaction.values[0];
+                // Already deferred at top
+
+                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
+                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete for this product.' });
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId(`sel_db_del_${pid}`)
+                    .setPlaceholder('Select an entry to delete...');
+                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
+
+                return safeReply(interaction, { content: `🗑️ Deleting stock from \`${pid}\`. Select an entry:`, components: [new ActionRowBuilder().addComponents(select)] });
             }
 
             // ── sel_buy ───────────────────────────────────────
@@ -2624,16 +2758,11 @@ client.once('clientReady', async () => {
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
         await refreshBanCache(); // Load banned users into memory for 0ms lookups
 
-        // Refresh database monitor embeds on startup (Live Stock Only — Sequential to prevent duplicates)
-        const { data: allProducts } = await supabase.from('products').select('*');
-        if (allProducts) {
-            const liveDrops = allProducts.filter(p => !isAuctionProduct(p));
-            console.log(`[READY] Syncing ${liveDrops.length} Live Stock monitors (sequential)...`);
-            for (const p of liveDrops) {
-                await updateDatabaseEmbed(p.id).catch(e => console.warn(`[READY] Monitor sync failed for ${p.id}:`, e.message));
-            }
-            console.log(`[READY] All Live Stock monitors synced.`);
-        }
+        // Migrate old per-product monitors to unified monitor (one-time cleanup)
+        await migrateToUnifiedMonitor().catch(e => console.warn('[READY] Migration failed:', e.message));
+        // Create/update unified database monitor
+        await updateUnifiedMonitor().catch(e => console.warn('[READY] Unified monitor failed:', e.message));
+        console.log('[READY] Unified monitor synced.');
 
         const config = loadConfig();
         const interval = Math.max(90000, config.updateInterval || 90000); // 90s for VPS stability
