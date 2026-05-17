@@ -184,17 +184,16 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.8.1',
+    version: '3.8.2',
     codename: 'Unified Monitor',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all Live Stock products in 1 embed.' },
         { type: 'NEW', desc: 'Monitor: Product selector for Add/Edit/Delete Stock actions.' },
-        { type: 'FIX', desc: 'Loop: Timeout protection (120s) prevents stuck/hanging cycles.' },
-        { type: 'FIX', desc: 'Loop: Reduced stagger delays for faster refresh cycles.' },
-        { type: 'FIX', desc: 'Loop: Migration runs once and is saved to config.' },
-        { type: 'FIX', desc: 'Presence: Throttled to prevent gateway spam (5min cooldown).' },
-        { type: 'SYSTEM', desc: 'Loop: Auto-recovery on frozen cycles with force-unlock.' }
+        { type: 'FIX', desc: 'Timestamp: Last Update now always realtime on every refresh cycle.' },
+        { type: 'FIX', desc: 'Timestamp: Force-refresh timestamps even when data unchanged.' },
+        { type: 'FIX', desc: 'Loop: Timeout protection (120s) & auto-recovery on frozen cycles.' },
+        { type: 'SYSTEM', desc: 'Loop: Optimized stagger delays & presence throttle (5min).' }
     ]
 };
 
@@ -224,6 +223,7 @@ function debounce(key, fn, delayMs = 2000) {
 
 // ── Dashboard Change Detection ──
 let _lastDashboardHash = '';
+let _lastDashboardEditAt = 0;
 let _lastAuctionHash = '';
 
 // In-memory ban cache for ultra-fast (0ms) interaction security
@@ -596,12 +596,14 @@ async function updateDashboard() {
 
         const products = allProducts.filter(p => !isAuctionProduct(p));
 
-        // Change detection: skip API call if data AND config AND emoji unchanged
+        // Change detection: skip API call if data unchanged AND last edit was recent (<60s)
         const emojiHash = JSON.stringify(config.customEmoji?.liveStock || {});
         const configHash = `${config.embed?.title}|${config.embed?.description}|${config.embed?.color}|${emojiHash}`;
         const hash = configHash + '||' + products.map(p => `${p.id}:${p.stock}:${p.price}`).join('|');
-        if (hash === _lastDashboardHash) return;
+        const timeSinceLastEdit = Date.now() - _lastDashboardEditAt;
+        if (hash === _lastDashboardHash && timeSinceLastEdit < 60000) return;
         _lastDashboardHash = hash;
+        _lastDashboardEditAt = Date.now();
 
         const channel = await client.channels.fetch(process.env.PW_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
         if (!channel) return;
