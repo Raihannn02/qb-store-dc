@@ -184,13 +184,13 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.0.1',
+    version: '4.0.2',
     codename: 'Sold Archive',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Sold Data: Search panel for admin to lookup sold products.' },
         { type: 'NEW', desc: 'Sold Data: Archive all sold items to database permanently.' },
-        { type: 'NEW', desc: 'Sold Data: Search by Order ID, Product, Buyer, Content.' },
+        { type: 'FIX', desc: 'Sold Data: Fixed modal trigger for search button.' },
         { type: 'FIX', desc: 'Sold Data: Fixed Supabase query builder compatibility.' },
         { type: 'SYSTEM', desc: 'Database: Auto-create sold_archive table on startup.' }
     ]
@@ -1580,7 +1580,7 @@ client.on('interactionCreate', async interaction => {
     try {
         // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
         // Determine if we should defer (Buttons/Menus) or skip (Modals)
-        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
+        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'btn_search_sold', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
         const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
