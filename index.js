@@ -184,16 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.8.2',
-    codename: 'Unified Monitor',
+    version: '3.9.0',
+    codename: 'Counting Track',
     date: 'May 18, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all Live Stock products in 1 embed.' },
-        { type: 'NEW', desc: 'Monitor: Product selector for Add/Edit/Delete Stock actions.' },
-        { type: 'FIX', desc: 'Timestamp: Last Update now always realtime on every refresh cycle.' },
-        { type: 'FIX', desc: 'Timestamp: Force-refresh timestamps even when data unchanged.' },
-        { type: 'FIX', desc: 'Loop: Timeout protection (120s) & auto-recovery on frozen cycles.' },
-        { type: 'SYSTEM', desc: 'Loop: Optimized stagger delays & presence throttle (5min).' }
+        { type: 'NEW', desc: 'Counting: Realtime server statistics in #count-track.' },
+        { type: 'NEW', desc: 'Counting: Total Members, Total Customers, Total Sold.' },
+        { type: 'NEW', desc: 'Counting: Auto-sync on payment success, member join/leave.' },
+        { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all products in 1 embed.' },
+        { type: 'SYSTEM', desc: 'Loop: Timeout protection & optimized refresh cycle.' }
     ]
 };
 
@@ -1088,6 +1087,8 @@ client.on('guildMemberAdd', async member => {
     } catch (e) {
         console.error('[ENTRY] guildMemberAdd error:', e);
     }
+    // Sync counting track on member join
+    debounce('counting_track', () => updateCountingTrack(), 5000);
 });
 
 client.on('guildMemberRemove', async member => {
@@ -1112,6 +1113,8 @@ client.on('guildMemberRemove', async member => {
     } catch (e) {
         console.error('[LEAVE] guildMemberRemove error:', e);
     }
+    // Sync counting track on member leave
+    debounce('counting_track', () => updateCountingTrack(), 5000);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1701,8 +1704,14 @@ client.on('interactionCreate', async interaction => {
                             } catch (roleErr) { console.error('[ROLE] Failed to add role:', roleErr.message); }
                         }
 
+                        // Increment sold counter
+                        const cfg = loadConfig();
+                        cfg.totalSold = (cfg.totalSold || 0) + pay.qty;
+                        saveConfig(cfg);
+
                         updateDashboard();
                         if (!isAuction) updateDatabaseEmbed(pay.product_id);
+                        debounce('counting_track', () => updateCountingTrack(), 3000);
 
                         return;
                     } else {
@@ -2444,9 +2453,15 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
 
+                // Increment sold counter
+                const cfgSold = loadConfig();
+                cfgSold.totalSold = (cfgSold.totalSold || 0) + pay.qty;
+                saveConfig(cfgSold);
+
                 await safeReply(interaction, { content: `✅ Order \`${inv}\` fulfilled manually!` });
                 updateDashboard();
                 updateDatabaseEmbed(pay.product_id);
+                debounce('counting_track', () => updateCountingTrack(), 3000);
                 return;
             }
 
@@ -2782,6 +2797,10 @@ client.once('clientReady', async () => {
         await updateUnifiedMonitor().catch(e => console.warn('[READY] Unified monitor failed:', e.message));
         console.log('[READY] Unified monitor synced.');
 
+        // Initialize counting track
+        await updateCountingTrack().catch(e => console.warn('[READY] Counting track failed:', e.message));
+        console.log('[READY] Counting track synced.');
+
         const config = loadConfig();
         const interval = Math.max(90000, config.updateInterval || 90000); // 90s for VPS stability
         const CYCLE_TIMEOUT_MS = 120000; // 120s max per cycle — force-unlock if stuck
@@ -2825,6 +2844,7 @@ client.once('clientReady', async () => {
                     await checkAuctionSettlements().catch(() => { });
                     await updateHoneypotWarning().catch(() => { });
                     await refreshBanCache().catch(() => { });
+                    await updateCountingTrack().catch(() => { });
                     refreshPresence();
                 } catch (e) {
                     if (!e.message?.includes('Connect Timeout')) console.error('[LOOP] Failure in refresh cycle:', e.message);
