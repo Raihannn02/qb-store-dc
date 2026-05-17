@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '3.9.0',
+    version: '3.9.1',
     codename: 'Counting Track',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Counting: Realtime server statistics in #count-track.' },
         { type: 'NEW', desc: 'Counting: Total Members, Total Customers, Total Sold.' },
-        { type: 'NEW', desc: 'Counting: Auto-sync on payment success, member join/leave.' },
-        { type: 'NEW', desc: 'Monitor: Unified DATABASE MONITOR — all products in 1 embed.' },
-        { type: 'SYSTEM', desc: 'Loop: Timeout protection & optimized refresh cycle.' }
+        { type: 'FIX', desc: 'Counting: Total Sold now scans history log for real data.' },
+        { type: 'FIX', desc: 'Counting: Accumulated Qty from all completed orders.' },
+        { type: 'SYSTEM', desc: 'Counting: One-time scan on startup, cached for performance.' }
     ]
 };
 
@@ -1058,6 +1058,69 @@ async function updateVersionDashboard() {
 // ─────────────────────────────────────────────────────────────
 
 let _countingMembersFetched = false;
+let _totalSoldSynced = false;
+
+// Scan history log channel to calculate real Total Sold from completed orders
+async function syncTotalSoldFromHistory() {
+    const config = loadConfig();
+    // Skip if already synced (totalSold > 0 means data was calculated before)
+    if (config.totalSold > 0) {
+        console.log(`[COUNTING] Total Sold already synced: ${config.totalSold}`);
+        return config.totalSold;
+    }
+
+    const historyChannelId = process.env.HISTORY_LOG_CHANNEL_ID;
+    if (!historyChannelId) return 0;
+
+    const channel = await client.channels.fetch(historyChannelId).catch(() => null);
+    if (!channel) return 0;
+
+    console.log('[COUNTING] Scanning history log for Total Sold...');
+    let totalQty = 0;
+    let lastId = null;
+    let scanned = 0;
+
+    // Paginate through all messages in history log
+    while (true) {
+        const options = { limit: 100 };
+        if (lastId) options.before = lastId;
+
+        const messages = await channel.messages.fetch(options).catch(() => null);
+        if (!messages || messages.size === 0) break;
+
+        for (const [, msg] of messages) {
+            if (msg.author.id !== client.user.id || !msg.embeds?.length) continue;
+            const title = msg.embeds[0].title || '';
+
+            // Count from "Order Completed" embeds (auto + manual payments)
+            if (title === 'Order Completed') {
+                const qtyField = msg.embeds[0].fields?.find(f => f.name === 'Qty' || f.name === 'Quantity');
+                if (qtyField) {
+                    const qty = parseInt(qtyField.value.replace(/\D/g, ''));
+                    if (!isNaN(qty)) totalQty += qty;
+                }
+            }
+
+            // Count from "AUCTION DELIVERY LOG" embeds (1 item per auction)
+            if (title === 'AUCTION DELIVERY LOG') {
+                totalQty += 1;
+            }
+        }
+
+        scanned += messages.size;
+        lastId = messages.last().id;
+
+        // Safety: max 1000 messages to prevent excessive scanning
+        if (scanned >= 1000) break;
+    }
+
+    console.log(`[COUNTING] Scanned ${scanned} messages, Total Sold: ${totalQty}`);
+
+    // Save to config for persistence
+    config.totalSold = totalQty;
+    saveConfig(config);
+    return totalQty;
+}
 
 async function updateCountingTrack() {
     await withLock('counting_track', async () => {
@@ -1067,14 +1130,22 @@ async function updateCountingTrack() {
         const channel = await client.channels.fetch(channelId).catch(() => null);
         if (!channel) return;
 
-        const config = loadConfig();
         const guild = channel.guild;
 
-        // Fetch guild members once on first run for accurate cache, then rely on events
+        // Fetch guild members once on first run for accurate cache
         if (!_countingMembersFetched) {
             await guild.members.fetch().catch(() => { });
             _countingMembersFetched = true;
         }
+
+        // Sync Total Sold from history log on first run
+        if (!_totalSoldSynced) {
+            await syncTotalSoldFromHistory();
+            _totalSoldSynced = true;
+        }
+
+        // Read fresh config (after potential sync)
+        const config = loadConfig();
 
         // Total Members (non-bot, from cache)
         const totalMembers = guild.members.cache.filter(m => !m.user.bot).size;
@@ -1087,13 +1158,13 @@ async function updateCountingTrack() {
             totalCustomers = role ? role.members.filter(m => !m.user.bot).size : 0;
         }
 
-        // Total Sold (from config counter)
+        // Total Sold (from synced config)
         const totalSold = config.totalSold || 0;
 
         const unixNow = Math.floor(Date.now() / 1000);
 
         const embed = new EmbedBuilder()
-            .setTitle('QUANTUMBLOX STORE — Server Statistics')
+            .setTitle('QUANTUMBLOX STORE \u2014 Server Statistics')
             .setColor('#2b2d31')
             .setDescription(
                 `Realtime server and sales tracking.\n\n` +
