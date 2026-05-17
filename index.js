@@ -1054,6 +1054,104 @@ async function updateVersionDashboard() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// updateCountingTrack
+// ─────────────────────────────────────────────────────────────
+
+let _countingMembersFetched = false;
+
+async function updateCountingTrack() {
+    await withLock('counting_track', async () => {
+        const channelId = process.env.COUNT_TRACK_CHANNEL_ID;
+        if (!channelId) return;
+
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (!channel) return;
+
+        const config = loadConfig();
+        const guild = channel.guild;
+
+        // Fetch guild members once on first run for accurate cache, then rely on events
+        if (!_countingMembersFetched) {
+            await guild.members.fetch().catch(() => { });
+            _countingMembersFetched = true;
+        }
+
+        // Total Members (non-bot, from cache)
+        const totalMembers = guild.members.cache.filter(m => !m.user.bot).size;
+
+        // Total Customers (members with customer role)
+        const customerRoleId = process.env.CUSTOMER_ROLE_ID || process.env.COSTUMER_ROLE_ID;
+        let totalCustomers = 0;
+        if (customerRoleId) {
+            const role = guild.roles.cache.get(customerRoleId);
+            totalCustomers = role ? role.members.filter(m => !m.user.bot).size : 0;
+        }
+
+        // Total Sold (from config counter)
+        const totalSold = config.totalSold || 0;
+
+        const unixNow = Math.floor(Date.now() / 1000);
+
+        const embed = new EmbedBuilder()
+            .setTitle('QUANTUMBLOX STORE — Server Statistics')
+            .setColor('#2b2d31')
+            .setDescription(
+                `Realtime server and sales tracking.\n\n` +
+                `**Total Members**\n` +
+                `\`\`\`${totalMembers.toLocaleString('id-ID')}\`\`\`\n` +
+                `**Total Customers**\n` +
+                `\`\`\`${totalCustomers.toLocaleString('id-ID')}\`\`\`\n` +
+                `**Total Sold**\n` +
+                `\`\`\`${totalSold.toLocaleString('id-ID')}\`\`\``
+            )
+            .addFields(
+                { name: 'Last Update', value: `<t:${unixNow}:R>`, inline: true }
+            )
+            .setTimestamp();
+
+        // 1. Try saved message ID
+        const savedId = config.countingTrackMessageId;
+        if (savedId) {
+            try {
+                const msg = await channel.messages.fetch(savedId);
+                if (msg && msg.author.id === client.user.id) {
+                    await withRetry(() => msg.edit({ embeds: [embed] }), 3, 3000);
+                    return;
+                }
+            } catch (e) {
+                if (e.code === 10008 || e.status === 404) {
+                    config.countingTrackMessageId = null;
+                    saveConfig(config);
+                }
+            }
+        }
+
+        // 2. Search for existing counting embed
+        try {
+            const msgs = await channel.messages.fetch({ limit: 50 });
+            const found = msgs.find(m => {
+                if (m.author.id !== client.user.id || !m.embeds?.length) return false;
+                return m.embeds[0].title?.includes('Server Statistics');
+            });
+            if (found) {
+                config.countingTrackMessageId = found.id;
+                saveConfig(config);
+                await withRetry(() => found.edit({ embeds: [embed] }), 3, 3000);
+                return;
+            }
+        } catch { /* search failed */ }
+
+        // 3. Create new
+        const nMsg = await withRetry(() => channel.send({ embeds: [embed] }), 3, 3000)
+            .catch(e => console.error('[COUNTING] Send failed:', e.message));
+        if (nMsg) {
+            config.countingTrackMessageId = nMsg.id;
+            saveConfig(config);
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY & LEAVE ZONE
 // ─────────────────────────────────────────────────────────────
 
