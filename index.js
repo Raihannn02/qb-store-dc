@@ -184,14 +184,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.0.0',
+    version: '4.0.1',
     codename: 'Sold Archive',
     date: 'May 18, 2026',
     changelog: [
         { type: 'NEW', desc: 'Sold Data: Search panel for admin to lookup sold products.' },
         { type: 'NEW', desc: 'Sold Data: Archive all sold items to database permanently.' },
         { type: 'NEW', desc: 'Sold Data: Search by Order ID, Product, Buyer, Content.' },
-        { type: 'NEW', desc: 'Counting: Realtime server stats with history log sync.' },
+        { type: 'FIX', desc: 'Sold Data: Fixed Supabase query builder compatibility.' },
         { type: 'SYSTEM', desc: 'Database: Auto-create sold_archive table on startup.' }
     ]
 };
@@ -1272,7 +1272,11 @@ async function updateSoldDataDashboard() {
         const config = loadConfig();
 
         // Get total archived count
-        const { count } = await supabase.from('sold_archive').select('id', { count: 'exact', head: true }).catch(() => ({ count: 0 }));
+        let archiveCount = 0;
+        try {
+            const { count, error } = await supabase.from('sold_archive').select('id', { count: 'exact', head: true });
+            if (!error && count !== null) archiveCount = count;
+        } catch { /* table may not exist yet */ }
 
         const unixNow = Math.floor(Date.now() / 1000);
 
@@ -1283,7 +1287,7 @@ async function updateSoldDataDashboard() {
                 `Search and lookup all sold product data.\n` +
                 `All completed transactions are permanently archived here.\n\n` +
                 `**Total Archived Records**\n` +
-                `\`\`\`${(count || 0).toLocaleString('id-ID')}\`\`\`\n` +
+                `\`\`\`${archiveCount.toLocaleString('id-ID')}\`\`\`\n` +
                 `**Search Criteria**\n` +
                 `\`\`\`\n` +
                 `Order ID    \u2014 Search by invoice/order ID\n` +
