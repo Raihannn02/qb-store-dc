@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.2.0',
-    codename: 'Edit Auction Product',
+    version: '4.2.1',
+    codename: 'Real-Time Auction End',
     date: 'May 20, 2026',
     changelog: [
+        { type: 'FIX', desc: 'Auction: Optimized auto-end background loop to trigger exactly on time.' },
         { type: 'NEW', desc: 'Auction: Added Edit Auction Product feature to modify active/pending auctions.' },
         { type: 'NEW', desc: 'Auction: Added Image Banner URL field to Add/Edit Product.' },
         { type: 'NEW', desc: 'Auction: Active auction dashboard now displays the product banner.' },
-        { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' },
-        { type: 'SYSTEM', desc: 'Database: One-time history log scan for past transactions.' }
+        { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' }
     ]
 };
 
@@ -928,20 +928,42 @@ async function updateAuctionDashboard() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// checkAuctionDeadlines
+// checkAuctionDeadlines & Real-Time Auto-End
 // ─────────────────────────────────────────────────────────────
+
+const _endingAuctions = new Set();
+
+function startAuctionFastLoop() {
+    console.log('[LOOP] Starting real-time auction expiry monitor (3s interval)...');
+    setInterval(async () => {
+        try {
+            const { data: activeAuc } = await supabase.from('auctions').select('id, name, end_time').eq('status', 'active');
+            if (!activeAuc || activeAuc.length === 0) return;
+
+            const now = Date.now();
+            for (const a of activeAuc) {
+                if (new Date(a.end_time).getTime() <= now) {
+                    if (_endingAuctions.has(a.id)) continue;
+                    _endingAuctions.add(a.id);
+                    
+                    console.log(`[DEADLINE] Auction detected expired: ${a.id} (${a.name})`);
+                    console.log(`[DEADLINE] Auto ending auction...`);
+                    
+                    endAuction(a.id).finally(() => {
+                        _endingAuctions.delete(a.id);
+                    });
+                }
+            }
+        } catch (e) {
+            if (e.code !== 10062 && !e.message?.includes('Timeout') && !e.message?.includes('fetch failed')) {
+                console.error('[DEADLINE] Fast loop error:', e.message);
+            }
+        }
+    }, 3000);
+}
 
 async function checkAuctionDeadlines() {
     try {
-        // 1. Auto-End Auctions that have expired
-        const { data: activeAuc } = await supabase.from('auctions').select('*').eq('status', 'active').lt('end_time', new Date().toISOString());
-        if (activeAuc && activeAuc.length > 0) {
-            for (const a of activeAuc) {
-                console.log(`[DEADLINE] Automatically ending auction ${a.id} (${a.name})`);
-                await endAuction(a.id);
-            }
-        }
-
         // 2. Cleanup expired pending payments (24h ban)
         const { data: expired } = await supabase.from('pending_payments')
             .select('*')
@@ -1046,6 +1068,7 @@ async function endAuction(aid) {
         }
     }
     updateAuctionDashboard();
+    console.log(`[DEADLINE] Auction finalized successfully: ${aid}`);
 }
 
 async function checkAuctionSettlements() {
@@ -3429,6 +3452,7 @@ client.once('clientReady', async () => {
         await updateVersionDashboard().catch(e => console.error('[READY] Version dash failed:', e.message));
         await updateAuctionDashboard().catch(e => console.error('[READY] Auction dash failed:', e.message));
         await updateStockDashboard().catch(e => console.error('[READY] Stock dash failed:', e.message));
+        startAuctionFastLoop();
         checkAuctionDeadlines();
         checkAuctionSettlements();
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
