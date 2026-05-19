@@ -184,12 +184,12 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.0.3',
-    codename: 'Sold Archive',
-    date: 'May 18, 2026',
+    version: '4.1.0',
+    codename: 'Auction Banner Update',
+    date: 'May 20, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Sold Data: Search panel for admin to lookup sold products.' },
-        { type: 'NEW', desc: 'Sold Data: Archive all sold items to database permanently.' },
+        { type: 'NEW', desc: 'Auction: Added Image Banner URL field to Add/Edit Product.' },
+        { type: 'NEW', desc: 'Auction: Active auction dashboard now displays the product banner.' },
         { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' },
         { type: 'FIX', desc: 'Sold Data: Duplicate prevention via order_id check.' },
         { type: 'SYSTEM', desc: 'Database: One-time history log scan for past transactions.' }
@@ -337,6 +337,21 @@ async function checkSchemaSupport() {
     } catch {
         console.warn('[SCHEMA] Could not verify sold_archive table.');
     }
+
+    // Ensure banner_url column exists
+    try {
+        const { error } = await supabase.from('products').select('banner_url').limit(1);
+        if (error && error.code === '42703') {
+            console.warn('[SCHEMA] "banner_url" column missing in "products" table. Please add it via Supabase Dashboard.');
+            console.warn('[SCHEMA] SQL: ALTER TABLE products ADD COLUMN banner_url text;');
+        }
+        
+        const { error: err2 } = await supabase.from('auctions').select('banner_url').limit(1);
+        if (err2 && err2.code === '42703') {
+            console.warn('[SCHEMA] "banner_url" column missing in "auctions" table. Please add it via Supabase Dashboard.');
+            console.warn('[SCHEMA] SQL: ALTER TABLE auctions ADD COLUMN banner_url text;');
+        }
+    } catch {}
 }
 
 // Archive sold stock items to sold_archive table
@@ -888,6 +903,10 @@ async function updateAuctionDashboard() {
                     { name: `${eAU('rules')} Auction Rules`, value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic **PERMANENT BAN**.\n• Settlement: Winner must finalize payment within **1 hour**.`, inline: false },
                     { name: `${eAU('lastUpdate')} Last Update`, value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
                 );
+
+            if (auction.banner_url && (auction.banner_url.startsWith('http://') || auction.banner_url.startsWith('https://'))) {
+                try { embed.setImage(auction.banner_url); } catch { /* ignore invalid url */ }
+            }
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -2461,7 +2480,8 @@ client.on('interactionCreate', async interaction => {
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Pixel World Acc').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Gaming').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('banner').setLabel('Image Banner URL (Optional)').setPlaceholder('https://...').setStyle(TextInputStyle.Short).setRequired(false))
                     );
                     return await safeModal(interaction, modal);
                 }
@@ -2584,7 +2604,8 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setValue(p.category_name || '').setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true))
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('banner').setLabel('Image Banner URL (Optional)').setValue(p.banner_url || '').setPlaceholder('https://...').setStyle(TextInputStyle.Short).setRequired(false))
                 );
                 return await safeModal(interaction, modal);
             }
@@ -3070,16 +3091,28 @@ client.on('interactionCreate', async interaction => {
                 const name = interaction.fields.getTextInputValue('name');
                 const category = interaction.fields.getTextInputValue('category');
                 const desc = interaction.fields.getTextInputValue('desc');
+                const banner = interaction.fields.getTextInputValue('banner')?.trim() || null;
 
                 await safeDefer(interaction);
 
-                const { error: insErr } = await supabase.from('products').insert([{
+                const payload = {
                     id: manualPid,
                     name,
                     category_name: category,
                     description: desc,
                     system_type: 'auction'
-                }]);
+                };
+                if (banner) payload.banner_url = banner;
+
+                let { error: insErr } = await supabase.from('products').insert([payload]);
+                
+                // Fallback if banner_url column doesn't exist
+                if (insErr && insErr.code === '42703' && banner) {
+                    delete payload.banner_url;
+                    const fallback = await supabase.from('products').insert([payload]);
+                    insErr = fallback.error;
+                    if (!insErr) console.warn(`[WARN] banner_url column missing in products table. Skipped saving banner.`);
+                }
 
                 if (insErr) return safeReply(interaction, { content: `❌ Failed to create product: ${insErr.message}` });
                 await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
@@ -3094,14 +3127,26 @@ client.on('interactionCreate', async interaction => {
                 const name = interaction.fields.getTextInputValue('name');
                 const category = interaction.fields.getTextInputValue('category');
                 const desc = interaction.fields.getTextInputValue('desc');
+                const banner = interaction.fields.getTextInputValue('banner')?.trim() || null;
 
                 await safeDefer(interaction);
 
-                const { error: updErr } = await supabase.from('products').update({
+                const payload = {
                     name,
                     category_name: category,
                     description: desc
-                }).eq('id', pid);
+                };
+                if (banner !== null) payload.banner_url = banner;
+
+                let { error: updErr } = await supabase.from('products').update(payload).eq('id', pid);
+
+                // Fallback if banner_url column doesn't exist
+                if (updErr && updErr.code === '42703' && banner !== null) {
+                    delete payload.banner_url;
+                    const fallback = await supabase.from('products').update(payload).eq('id', pid);
+                    updErr = fallback.error;
+                    if (!updErr) console.warn(`[WARN] banner_url column missing in products table. Skipped updating banner.`);
+                }
 
                 if (updErr) return safeReply(interaction, { content: `❌ Failed to update product: ${updErr.message}` });
 
@@ -3130,7 +3175,7 @@ client.on('interactionCreate', async interaction => {
 
                 const endTime = new Date(Date.now() + duration * 60000).toISOString();
 
-                const { error: insertErr } = await supabase.from('auctions').insert([{
+                const payload = {
                     name: p.name,
                     category_name: p.category_name,
                     description: p.description,
@@ -3140,7 +3185,18 @@ client.on('interactionCreate', async interaction => {
                     product_id: pid,
                     status: 'pending',
                     end_time: endTime
-                }]);
+                };
+                if (p.banner_url) payload.banner_url = p.banner_url;
+
+                let { error: insertErr } = await supabase.from('auctions').insert([payload]);
+
+                // Fallback if banner_url column doesn't exist
+                if (insertErr && insertErr.code === '42703' && p.banner_url) {
+                    delete payload.banner_url;
+                    const fallback = await supabase.from('auctions').insert([payload]);
+                    insertErr = fallback.error;
+                    if (!insertErr) console.warn(`[WARN] banner_url column missing in auctions table. Skipped saving banner.`);
+                }
 
                 if (insertErr) return safeReply(interaction, { content: `❌ Failed to create auction: ${insertErr.message}` });
 
