@@ -184,14 +184,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.1.0',
-    codename: 'Auction Banner Update',
+    version: '4.2.0',
+    codename: 'Edit Auction Product',
     date: 'May 20, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Auction: Added Edit Auction Product feature to modify active/pending auctions.' },
         { type: 'NEW', desc: 'Auction: Added Image Banner URL field to Add/Edit Product.' },
         { type: 'NEW', desc: 'Auction: Active auction dashboard now displays the product banner.' },
         { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' },
-        { type: 'FIX', desc: 'Sold Data: Duplicate prevention via order_id check.' },
         { type: 'SYSTEM', desc: 'Database: One-time history log scan for past transactions.' }
     ]
 };
@@ -1719,7 +1719,7 @@ client.on('interactionCreate', async interaction => {
     try {
         // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
         // Determine if we should defer (Buttons/Menus) or skip (Modals)
-        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'btn_search_sold', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
+        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'btn_search_sold', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_auction_edit_active_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
         const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
@@ -1859,6 +1859,7 @@ client.on('interactionCreate', async interaction => {
                     .setPlaceholder('Auction Management...')
                     .addOptions([
                         { label: 'Add Auction Product', description: 'Start auction using product from database', value: 'opt_add_auction', emoji: '➕' },
+                        { label: 'Edit Auction Product', description: 'Modify active or pending auction settings', value: 'opt_edit_active_auction', emoji: '📝' },
                         { label: 'Add Product', description: 'Register new product to database', value: 'opt_add_category', emoji: '🏷️' },
                         { label: 'Edit Product', description: 'Modify existing product in database', value: 'opt_edit_category', emoji: '✏️' },
                         { label: 'Delete Product', description: 'Permanently remove product from database', value: 'opt_delete_category', emoji: '🗑️' },
@@ -2474,6 +2475,16 @@ client.on('interactionCreate', async interaction => {
                     return await safeModal(interaction, modal);
                 }
 
+                if (choice === 'opt_edit_active_auction') {
+                    await safeDefer(interaction);
+                    const { data: auctions } = await supabase.from('auctions').select('*').in('status', ['pending', 'active']).order('created_at', { ascending: false });
+                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No pending or active auctions found to edit.' });
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_active_pick').setPlaceholder('Select an auction to edit...');
+                    auctions.forEach(a => menu.addOptions({ label: `${a.name} (${a.status})`, description: `Product ID: ${a.product_id} | Base: ${a.base_price}`, value: a.id }));
+                    return safeReply(interaction, { content: '✏️ **Edit Auction Product**\nSelect an active/pending auction to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
+                }
+
                 if (choice === 'opt_add_category') {
                     const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Product');
                     modal.addComponents(
@@ -2606,6 +2617,29 @@ client.on('interactionCreate', async interaction => {
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setValue(p.category_name || '').setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('banner').setLabel('Image Banner URL (Optional)').setValue(p.banner_url || '').setPlaceholder('https://...').setStyle(TextInputStyle.Short).setRequired(false))
+                );
+                return await safeModal(interaction, modal);
+            }
+
+            // ── sel_auction_edit_active_pick ─────────────────
+            if (interaction.customId === 'sel_auction_edit_active_pick') {
+                const aucId = interaction.values[0];
+                const { data: a } = await supabase.from('auctions').select('*').eq('id', aucId).single();
+                if (!a) return safeReply(interaction, { content: '❌ Auction not found.', flags: [MessageFlags.Ephemeral] });
+
+                // Calculate remaining duration in minutes
+                let remainingMins = 60;
+                if (a.end_time) {
+                    const diffMs = new Date(a.end_time) - Date.now();
+                    remainingMins = Math.max(1, Math.round(diffMs / 60000));
+                }
+
+                const modal = new ModalBuilder().setCustomId(`mod_edit_active_auction_${aucId}`).setTitle('✏️ Edit Auction Settings');
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID').setValue(a.product_id || '').setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setValue(String(a.base_price || 0)).setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue(String(a.bid_increment || 5000)).setStyle(TextInputStyle.Short).setRequired(true)),
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Remaining Duration (Minutes)').setValue(String(remainingMins)).setStyle(TextInputStyle.Short).setRequired(true))
                 );
                 return await safeModal(interaction, modal);
             }
@@ -3201,6 +3235,62 @@ client.on('interactionCreate', async interaction => {
                 if (insertErr) return safeReply(interaction, { content: `❌ Failed to create auction: ${insertErr.message}` });
 
                 await safeReply(interaction, { content: `✅ Auction for \`${p.name}\` created as PENDING. Start it via Settings.` });
+                updateAuctionDashboard();
+                return;
+            }
+
+            // ── mod_edit_active_auction_ ──────────────────────────
+            if (interaction.customId.startsWith('mod_edit_active_auction_')) {
+                const aucId = interaction.customId.replace('mod_edit_active_auction_', '');
+                const pid = interaction.fields.getTextInputValue('pid').trim();
+                const basePriceStr = interaction.fields.getTextInputValue('base_price');
+                const incStr = interaction.fields.getTextInputValue('increment');
+                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
+
+                await safeDefer(interaction);
+
+                const { data: auc } = await supabase.from('auctions').select('*').eq('id', aucId).single();
+                if (!auc) return safeReply(interaction, { content: '❌ Auction not found.' });
+
+                // Fetch product to ensure it exists and get names
+                const { data: p, error: pErr } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (pErr || !p) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found in database.` });
+
+                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
+                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
+                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return safeReply(interaction, { content: '❌ Invalid price, increment, or duration format.' });
+
+                const endTime = new Date(Date.now() + duration * 60000).toISOString();
+
+                // If current_bid is equal to old base_price (no bids), update it to new base_price.
+                // Otherwise leave current_bid as is so we don't ruin active bids.
+                const newCurrentBid = (auc.current_bid === auc.base_price) ? basePrice : Math.max(basePrice, auc.current_bid);
+
+                const payload = {
+                    product_id: pid,
+                    name: p.name,
+                    category_name: p.category_name,
+                    description: p.description,
+                    base_price: basePrice,
+                    current_bid: newCurrentBid,
+                    bid_increment: increment,
+                    end_time: endTime
+                };
+
+                if (p.banner_url) payload.banner_url = p.banner_url;
+
+                let { error: updErr } = await supabase.from('auctions').update(payload).eq('id', aucId);
+                
+                // Fallback for missing banner_url column
+                if (updErr && updErr.code === '42703' && p.banner_url) {
+                    delete payload.banner_url;
+                    const fallback = await supabase.from('auctions').update(payload).eq('id', aucId);
+                    updErr = fallback.error;
+                }
+
+                if (updErr) return safeReply(interaction, { content: `❌ Failed to update auction: ${updErr.message}` });
+
+                await safeReply(interaction, { content: `✅ Auction updated successfully!\nProduct: \`${pid}\`\nStart Price: \`Rp ${basePrice.toLocaleString('id-ID')}\`\nBid Increment: \`Rp ${increment.toLocaleString('id-ID')}\`\nRemaining: \`${duration} mins\`` });
                 updateAuctionDashboard();
                 return;
             }
