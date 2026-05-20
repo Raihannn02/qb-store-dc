@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.2.1',
-    codename: 'Real-Time Auction End',
+    version: '4.3.0',
+    codename: 'Security Bypass',
     date: 'May 20, 2026',
     changelog: [
+        { type: 'NEW', desc: 'Security: Added Admin Role Bypass protection across all auction modules.' },
+        { type: 'FIX', desc: 'Security: Automatically unban/whitelist admins on startup and interaction.' },
+        { type: 'NEW', desc: 'Logging: Added clear audit logs for admin bypass operations.' },
         { type: 'FIX', desc: 'Auction: Optimized auto-end background loop to trigger exactly on time.' },
-        { type: 'NEW', desc: 'Auction: Added Edit Auction Product feature to modify active/pending auctions.' },
-        { type: 'NEW', desc: 'Auction: Added Image Banner URL field to Add/Edit Product.' },
-        { type: 'NEW', desc: 'Auction: Active auction dashboard now displays the product banner.' },
-        { type: 'FIX', desc: 'Sold Data: Migration of historical orders into archive.' }
+        { type: 'NEW', desc: 'Auction: Added Edit Auction Product feature to modify active/pending auctions.' }
     ]
 };
 
@@ -232,7 +232,32 @@ async function refreshBanCache() {
     try {
         const { data } = await supabase.from('banned_users').select('id, reason');
         banCache.clear();
-        if (data) data.forEach(b => banCache.set(b.id, b.reason || 'Violation of terms'));
+        
+        const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+        const guild = client.guilds.cache.first();
+
+        if (data) {
+            for (const b of data) {
+                let isAdmin = false;
+                if (guild) {
+                    try {
+                        const member = await guild.members.fetch(b.id).catch(() => null);
+                        if (member && member.roles.cache.has(adminRoleId)) {
+                            isAdmin = true;
+                            console.log(`[SECURITY] Admin bypass detected: Automatically unbanning admin ${member.user.tag} (${b.id}) from database blacklist.`);
+                            await supabase.from('banned_users').delete().eq('id', b.id);
+                        }
+                    } catch (err) {
+                        // Silent
+                    }
+                }
+                
+                if (!isAdmin) {
+                    banCache.set(b.id, b.reason || 'Violation of terms');
+                }
+            }
+        }
+        
         // Only log when count changes to avoid spam
         if (banCache.size !== _lastBanCount) {
             console.log(`[BAN-CACHE] Updated: ${banCache.size} banned users cached.`);
@@ -973,6 +998,26 @@ async function checkAuctionDeadlines() {
         if (!expired || expired.length === 0) return;
 
         for (const pay of expired) {
+            const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+            let isAdmin = false;
+            try {
+                const guild = client.guilds.cache.first();
+                if (guild) {
+                    const member = await guild.members.fetch(pay.user_id).catch(() => null);
+                    if (member && member.roles.cache.has(adminRoleId)) {
+                        isAdmin = true;
+                    }
+                }
+            } catch (err) {
+                console.error(`[SECURITY] Error checking admin status for user ${pay.user_id}:`, err.message);
+            }
+
+            if (isAdmin) {
+                console.log(`[SECURITY] Admin bypass detected: Skipping 24h auction non-payment ban for admin ${pay.user_id}.`);
+                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+                continue;
+            }
+
             console.log(`[DEADLINE] Banning user ${pay.user_id} for non-payment of auction ${pay.invoice_id}`);
             // ... (rest of ban logic remains same)
             try {
@@ -1098,6 +1143,25 @@ async function checkAuctionSettlements() {
                 continue;
             }
             const userId = pay.user_id;
+            const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+            let isAdmin = false;
+            try {
+                const guild = client.guilds.cache.first();
+                if (guild) {
+                    const member = await guild.members.fetch(userId).catch(() => null);
+                    if (member && member.roles.cache.has(adminRoleId)) {
+                        isAdmin = true;
+                    }
+                }
+            } catch (err) {
+                console.error(`[SECURITY] Error checking admin status for user ${userId}:`, err.message);
+            }
+
+            if (isAdmin) {
+                console.log(`[SECURITY] Admin bypass detected: Skipping 1h auction failure ban and reroll for admin ${userId}.`);
+                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+                continue;
+            }
 
             console.log(`[SETTLEMENT] Auction ${aid} winner ${userId} failed to pay. Processing ban and reroll...`);
 
@@ -1757,10 +1821,26 @@ client.on('interactionCreate', async interaction => {
         // ── 2. LOGGING & SECURITY (Priority #2 - Occurs after acknowledgement) ──
         console.log(`[INTERACTION] ${interaction.user.tag} -> ${interaction.customId || 'N/A'}`);
 
-        // Ultra-fast ban check from memory cache (0ms vs ~200ms Supabase query)
-        if (banCache.has(interaction.user.id)) {
-            const reason = banCache.get(interaction.user.id);
-            return safeReply(interaction, { content: `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${reason}\``, flags: [MessageFlags.Ephemeral] });
+        // Check admin role to enforce bypass
+        const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+        const isAdmin = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
+
+        if (isAdmin) {
+            if (banCache.has(interaction.user.id)) {
+                console.log(`[SECURITY] Admin bypass detected: Unbanning admin ${interaction.user.tag} (${interaction.user.id})`);
+                banCache.delete(interaction.user.id);
+                supabase.from('banned_users').delete().eq('id', interaction.user.id)
+                    .then(({ error }) => {
+                        if (error) console.error(`[SECURITY] Failed to remove admin ${interaction.user.id} from database banned_users:`, error.message);
+                        else console.log(`[SECURITY] Admin ${interaction.user.id} removed from database banned_users.`);
+                    }).catch(e => console.error(`[SECURITY] Error removing admin ${interaction.user.id} from database:`, e.message));
+            }
+        } else {
+            // Ultra-fast ban check from memory cache (0ms vs ~200ms Supabase query)
+            if (banCache.has(interaction.user.id)) {
+                const reason = banCache.get(interaction.user.id);
+                return safeReply(interaction, { content: `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${reason}\``, flags: [MessageFlags.Ephemeral] });
+            }
         }
 
         // ── SLASH COMMANDS (disabled) ─────────────────────────
@@ -3322,6 +3402,9 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'mod_open_bid') {
                 const bidStr = interaction.fields.getTextInputValue('amount');
                 const bidAmt = parseInt(bidStr.replace(/\D/g, ''));
+
+                const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+                const isAdmin = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
 
                 if (isNaN(bidAmt)) {
                     // Anti-fake bid logic: Automated Ban for non-numeric troll bids
