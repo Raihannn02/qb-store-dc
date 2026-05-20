@@ -184,14 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.5.0',
-    codename: 'Auction Purge',
+    version: '4.6.0',
+    codename: 'Pending Guard',
     date: 'May 20, 2026',
     changelog: [
         { type: 'NEW', desc: 'Security: Added PostgreSQL atomic status transitions and local locks to endAuction.' },
         { type: 'NEW', desc: 'Security: Implemented strict bid-to-auction cross validation and winner ban-check.' },
         { type: 'NEW', desc: 'Security: Added NEEDS REVIEW warning state and log alerts for invalid finalize attempts.' },
-        { type: 'NEW', desc: 'Auction: Added Delete Auction Product feature with strict active/bid validation guards.' }
+        { type: 'NEW', desc: 'Auction: Added Delete Auction Product feature with strict active/bid validation guards.' },
+        { type: 'FIX', desc: 'Auction: Refined Delete Auction Product menu to display and permit pending status only.' }
     ]
 };
 
@@ -2260,13 +2261,20 @@ client.on('interactionCreate', async interaction => {
                 const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
                 if (!auction) return safeReply(interaction, { content: '❌ Auction product not found or already deleted.', components: [] });
 
-                if (auction.status === 'active') {
-                    return safeReply(interaction, { content: '❌ Cannot delete an active/live auction product. Please stop or close the auction first.', components: [] });
+                // Runtime Re-validation
+                if (auction.status !== 'pending') {
+                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to delete auction ${aid} which is now: ${auction.status}`);
+                    let warningMsg = `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently: **${auction.status.toUpperCase()}**.`;
+                    if (auction.status === 'active') {
+                        warningMsg = `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently **ACTIVE/LIVE** and cannot be deleted. Please stop or close the auction first.`;
+                    }
+                    return safeReply(interaction, { content: warningMsg, components: [] });
                 }
 
                 // Check bids presence
                 const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
                 if (bids && bids.length > 0) {
+                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to delete auction ${aid} which has bids in history.`);
                     return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
                 }
 
@@ -2275,7 +2283,7 @@ client.on('interactionCreate', async interaction => {
                     return safeReply(interaction, { content: `❌ Failed to delete auction: ${delErr.message}`, components: [] });
                 }
 
-                console.log(`[SECURITY] Auction product deleted: ${aid} (${auction.name}) | Deleted by Admin: ${interaction.user.tag} (${interaction.user.id}) | Timestamp: ${new Date().toISOString()}`);
+                console.log(`[SECURITY] Deleted pending auction product: ${aid} (${auction.name}) | Deleted by Admin: ${interaction.user.tag} (${interaction.user.id}) | Timestamp: ${new Date().toISOString()}`);
 
                 await safeReply(interaction, { content: `✅ Auction product **${auction.name}** has been successfully deleted.`, components: [] });
                 updateAuctionDashboard();
@@ -2806,10 +2814,12 @@ client.on('interactionCreate', async interaction => {
 
                 if (choice === 'opt_delete_auction') {
                     await safeDefer(interaction);
-                    const { data: auctions } = await supabase.from('auctions').select('*').order('created_at', { ascending: false });
-                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No auction products found in the database.' });
+                    const { data: auctions } = await supabase.from('auctions').select('*').eq('status', 'pending').order('created_at', { ascending: false });
+                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No pending auction products found in the database.' });
 
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick_auc').setPlaceholder('Select an auction to delete...');
+                    console.log(`[SECURITY] Pending product loaded: Found ${auctions.length} pending auctions. Loaded by Admin: ${interaction.user.tag}`);
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick_auc').setPlaceholder('Select a pending auction to delete...');
                     auctions.slice(0, 25).forEach(a => {
                         menu.addOptions({ 
                             label: `${a.name} (${a.status})`, 
@@ -2818,7 +2828,7 @@ client.on('interactionCreate', async interaction => {
                         });
                     });
                     return safeReply(interaction, { 
-                        content: '🗑️ **Delete Auction Product**\nSelect the auction product you wish to permanently remove:', 
+                        content: '🗑️ **Delete Pending Auction Product**\nSelect the pending auction product you wish to permanently remove:', 
                         components: [new ActionRowBuilder().addComponents(menu)] 
                     });
                 }
@@ -2966,13 +2976,15 @@ client.on('interactionCreate', async interaction => {
                 const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
                 if (!auction) return safeReply(interaction, { content: '❌ Auction product not found.', components: [] });
 
-                if (auction.status === 'active') {
-                    return safeReply(interaction, { content: '❌ Cannot delete an active/live auction product. Please stop or close the auction first.', components: [] });
+                if (auction.status !== 'pending') {
+                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to load confirm-delete for non-pending auction ${aid} (Status: ${auction.status})`);
+                    return safeReply(interaction, { content: `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently: **${auction.status.toUpperCase()}**.`, components: [] });
                 }
 
                 // Check bids presence
                 const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
                 if (bids && bids.length > 0) {
+                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to load confirm-delete for auction ${aid} with bids.`);
                     return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
                 }
 
@@ -2981,7 +2993,7 @@ client.on('interactionCreate', async interaction => {
                     new ButtonBuilder().setCustomId(`btn_cancel_del_auc_${aid}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
                 );
                 return safeReply(interaction, {
-                    content: `⚠️ **Confirm Auction Deletion**\nAre you sure you want to permanently delete the auction for **${auction.name}**?\n*This action will remove the auction item but will keep the underlying base product and stock completely intact.*`,
+                    content: `⚠️ **Confirm Auction Deletion**\nAre you sure you want to permanently delete the pending auction for **${auction.name}**?\n*This action will remove the auction item but will keep the underlying base product and stock completely intact.*`,
                     components: [row]
                 });
             }
