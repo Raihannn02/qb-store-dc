@@ -184,14 +184,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.4.0',
-    codename: 'Auction Shield',
+    version: '4.5.0',
+    codename: 'Auction Purge',
     date: 'May 20, 2026',
     changelog: [
         { type: 'NEW', desc: 'Security: Added PostgreSQL atomic status transitions and local locks to endAuction.' },
         { type: 'NEW', desc: 'Security: Implemented strict bid-to-auction cross validation and winner ban-check.' },
         { type: 'NEW', desc: 'Security: Added NEEDS REVIEW warning state and log alerts for invalid finalize attempts.' },
-        { type: 'NEW', desc: 'Logging: Implemented precise audit logs for auction lifecycle operations.' }
+        { type: 'NEW', desc: 'Auction: Added Delete Auction Product feature with strict active/bid validation guards.' }
     ]
 };
 
@@ -2097,6 +2097,7 @@ client.on('interactionCreate', async interaction => {
                         { label: 'Add Product', description: 'Register new product to database', value: 'opt_add_category', emoji: '🏷️' },
                         { label: 'Edit Product', description: 'Modify existing product in database', value: 'opt_edit_category', emoji: '✏️' },
                         { label: 'Delete Product', description: 'Permanently remove product from database', value: 'opt_delete_category', emoji: '🗑️' },
+                        { label: 'Delete Auction Product', description: 'Remove an auction product from database', value: 'opt_delete_auction', emoji: '❌' },
                         { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' },
                         { label: 'Set Custom Emoji', description: 'Change auction dashboard emoji', value: 'opt_custom_emoji_auction', emoji: '🎨' }
                     ]);
@@ -2246,6 +2247,48 @@ client.on('interactionCreate', async interaction => {
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
                 return safeReply(interaction, { content: '🗑️ **Delete Stock**\nSelect the category whose stock item you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
+            }
+
+            // ── btn_confirm_del_auc_ ───────────────────────────
+            if (interaction.customId.startsWith('btn_confirm_del_auc_')) {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
+                }
+                const aid = interaction.customId.replace('btn_confirm_del_auc_', '');
+                await safeDeferUpdate(interaction);
+
+                const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
+                if (!auction) return safeReply(interaction, { content: '❌ Auction product not found or already deleted.', components: [] });
+
+                if (auction.status === 'active') {
+                    return safeReply(interaction, { content: '❌ Cannot delete an active/live auction product. Please stop or close the auction first.', components: [] });
+                }
+
+                // Check bids presence
+                const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
+                if (bids && bids.length > 0) {
+                    return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
+                }
+
+                const { error: delErr } = await supabase.from('auctions').delete().eq('id', aid);
+                if (delErr) {
+                    return safeReply(interaction, { content: `❌ Failed to delete auction: ${delErr.message}`, components: [] });
+                }
+
+                console.log(`[SECURITY] Auction product deleted: ${aid} (${auction.name}) | Deleted by Admin: ${interaction.user.tag} (${interaction.user.id}) | Timestamp: ${new Date().toISOString()}`);
+
+                await safeReply(interaction, { content: `✅ Auction product **${auction.name}** has been successfully deleted.`, components: [] });
+                updateAuctionDashboard();
+                return;
+            }
+
+            // ── btn_cancel_del_auc_ ────────────────────────────
+            if (interaction.customId.startsWith('btn_cancel_del_auc_')) {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
+                }
+                await safeDeferUpdate(interaction);
+                return safeReply(interaction, { content: '❌ Deletion cancelled.', components: [] });
             }
 
             // ── btn_check_pay_ ────────────────────────────────
@@ -2761,6 +2804,25 @@ client.on('interactionCreate', async interaction => {
                     return safeReply(interaction, { content: '🗑️ **Delete Product**\nSelect a product to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
                 }
 
+                if (choice === 'opt_delete_auction') {
+                    await safeDefer(interaction);
+                    const { data: auctions } = await supabase.from('auctions').select('*').order('created_at', { ascending: false });
+                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No auction products found in the database.' });
+
+                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick_auc').setPlaceholder('Select an auction to delete...');
+                    auctions.slice(0, 25).forEach(a => {
+                        menu.addOptions({ 
+                            label: `${a.name} (${a.status})`, 
+                            description: `ID: ${a.id} | Product: ${a.product_id} | Bid: Rp ${a.current_bid.toLocaleString('id-ID')}`, 
+                            value: a.id 
+                        });
+                    });
+                    return safeReply(interaction, { 
+                        content: '🗑️ **Delete Auction Product**\nSelect the auction product you wish to permanently remove:', 
+                        components: [new ActionRowBuilder().addComponents(menu)] 
+                    });
+                }
+
                 if (choice === 'opt_custom_emoji_auction') {
                     // Already deferred at top
                     const keys = Object.keys(DEFAULT_EMOJI.auction);
@@ -2891,6 +2953,37 @@ client.on('interactionCreate', async interaction => {
                 updateDashboard();
                 updateStockDashboard();
                 return;
+            }
+
+            // ── sel_auction_delete_pick_auc ────────────────────
+            if (interaction.customId === 'sel_auction_delete_pick_auc') {
+                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
+                }
+                const aid = interaction.values[0];
+                await safeDeferUpdate(interaction);
+
+                const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
+                if (!auction) return safeReply(interaction, { content: '❌ Auction product not found.', components: [] });
+
+                if (auction.status === 'active') {
+                    return safeReply(interaction, { content: '❌ Cannot delete an active/live auction product. Please stop or close the auction first.', components: [] });
+                }
+
+                // Check bids presence
+                const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
+                if (bids && bids.length > 0) {
+                    return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
+                }
+
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`btn_confirm_del_auc_${aid}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId(`btn_cancel_del_auc_${aid}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+                );
+                return safeReply(interaction, {
+                    content: `⚠️ **Confirm Auction Deletion**\nAre you sure you want to permanently delete the auction for **${auction.name}**?\n*This action will remove the auction item but will keep the underlying base product and stock completely intact.*`,
+                    components: [row]
+                });
             }
             // ── sel_emoji_ls_pick ────────────────────────────
             if (interaction.customId === 'sel_emoji_ls_pick') {
