@@ -184,15 +184,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.3.0',
-    codename: 'Security Bypass',
+    version: '4.4.0',
+    codename: 'Auction Shield',
     date: 'May 20, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Security: Added Admin Role Bypass protection across all auction modules.' },
-        { type: 'FIX', desc: 'Security: Automatically unban/whitelist admins on startup and interaction.' },
-        { type: 'NEW', desc: 'Logging: Added clear audit logs for admin bypass operations.' },
-        { type: 'FIX', desc: 'Auction: Optimized auto-end background loop to trigger exactly on time.' },
-        { type: 'NEW', desc: 'Auction: Added Edit Auction Product feature to modify active/pending auctions.' }
+        { type: 'NEW', desc: 'Security: Added PostgreSQL atomic status transitions and local locks to endAuction.' },
+        { type: 'NEW', desc: 'Security: Implemented strict bid-to-auction cross validation and winner ban-check.' },
+        { type: 'NEW', desc: 'Security: Added NEEDS REVIEW warning state and log alerts for invalid finalize attempts.' },
+        { type: 'NEW', desc: 'Logging: Implemented precise audit logs for auction lifecycle operations.' }
     ]
 };
 
@@ -957,6 +956,33 @@ async function updateAuctionDashboard() {
 // ─────────────────────────────────────────────────────────────
 
 const _endingAuctions = new Set();
+const _finalizingAuctions = new Set();
+const _notifiedNearing = new Set();
+
+async function sendRestrictedWarningEmbed(auction, reason) {
+    try {
+        const logChanId = process.env.RESTRICTED_LOG_CHANNEL_ID || '1503766353721430036';
+        const logChan = await client.channels.fetch(logChanId).catch(() => null);
+        if (logChan) {
+            const embed = new EmbedBuilder()
+                .setTitle('⚠️ SECURITY ALERT: Auction Finalize Prevented')
+                .setColor('#d63031')
+                .setDescription(`An attempt to finalize an auction failed database security validation. The auction has been marked as **NEEDS REVIEW**.`)
+                .addFields(
+                    { name: 'Auction Name', value: `\`${auction.name}\` (ID: \`${auction.id}\`)`, inline: false },
+                    { name: 'Product ID', value: `\`${auction.product_id}\``, inline: true },
+                    { name: 'Highest Bidder', value: auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : 'None', inline: true },
+                    { name: 'Current Bid', value: `**${formatPrice(auction.current_bid)}**`, inline: true },
+                    { name: 'End Time', value: `<t:${Math.floor(new Date(auction.end_time).getTime() / 1000)}:F>`, inline: false },
+                    { name: 'Security Concern', value: `\`${reason}\``, inline: false }
+                )
+                .setTimestamp();
+            await logChan.send({ embeds: [embed] }).catch(() => {});
+        }
+    } catch (e) {
+        console.error('[SECURITY] Failed to send restricted warning embed:', e.message);
+    }
+}
 
 function startAuctionFastLoop() {
     console.log('[LOOP] Starting real-time auction expiry monitor (3s interval)...');
@@ -967,7 +993,19 @@ function startAuctionFastLoop() {
 
             const now = Date.now();
             for (const a of activeAuc) {
-                if (new Date(a.end_time).getTime() <= now) {
+                const timeLeft = new Date(a.end_time).getTime() - now;
+                
+                // Auction nearing deadline log (once per active auction cycle)
+                if (timeLeft <= 60000 && timeLeft > 0) {
+                    if (!_notifiedNearing.has(a.id)) {
+                        _notifiedNearing.add(a.id);
+                        console.log(`[SECURITY] Auction nearing deadline: ${a.id} (${a.name}) - ${Math.round(timeLeft / 1000)}s remaining.`);
+                    }
+                } else if (timeLeft > 60000) {
+                    _notifiedNearing.delete(a.id);
+                }
+
+                if (timeLeft <= 0) {
                     if (_endingAuctions.has(a.id)) continue;
                     _endingAuctions.add(a.id);
                     
@@ -1045,17 +1083,106 @@ async function checkAuctionDeadlines() {
     }
 }
 
-async function endAuction(aid) {
-    const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
-    if (!auction || auction.status !== 'active') return;
+async function endAuction(aid, isManual = false) {
+    if (_finalizingAuctions.has(aid)) {
+        console.log(`[SECURITY] Duplicate finalize blocked (Local lock active) for auction: ${aid}`);
+        return;
+    }
+    _finalizingAuctions.add(aid);
 
-    // Set ended IMMEDIATELY to prevent further bids
-    await supabase.from('auctions').update({ status: 'ended' }).eq('id', aid);
+    try {
+        // Atomic status transition in Supabase PostgreSQL
+        const { data: updatedRows, error: updateErr } = await supabase.from('auctions')
+            .update({ status: 'ended' })
+            .eq('id', aid)
+            .eq('status', 'active')
+            .select('*');
 
-    if (auction.highest_bidder_id) {
+        if (updateErr) {
+            console.error(`[SECURITY] Failed to transition status for auction ${aid}:`, updateErr.message);
+            return;
+        }
+        if (!updatedRows || updatedRows.length === 0) {
+            console.log(`[SECURITY] Duplicate finalize blocked: Auction ${aid} is already ended or not active.`);
+            return;
+        }
+
+        const auction = updatedRows[0];
+        console.log(`[DEADLINE] Auction nearing deadline / auto-end process triggered: ${aid} (${auction.name})`);
+
+        // Security check: Verify end time validity (with 5s grace period) for non-manual ends
+        const now = Date.now();
+        const endTime = new Date(auction.end_time).getTime();
+        if (!isManual && endTime > now + 5000) {
+            const reason = 'Auto-end triggered before auction duration completed.';
+            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
+            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
+            await sendRestrictedWarningEmbed(auction, reason);
+            return;
+        }
+
+        // Security check: Fetch and cross-validate highest bid from auction_bids history
+        const { data: bids, error: bidsErr } = await supabase.from('auction_bids')
+            .select('*')
+            .eq('auction_id', aid)
+            .order('amount', { ascending: false });
+
+        if (bidsErr) {
+            console.error(`[SECURITY] Failed to fetch bids for auction ${aid}:`, bidsErr.message);
+            // Revert status to active so it can be retried/inspected
+            await supabase.from('auctions').update({ status: 'active' }).eq('id', aid);
+            return;
+        }
+
+        const highestBid = bids && bids.length > 0 ? bids[0] : null;
+
+        // Verify bid presence consistency
+        if (!highestBid) {
+            if (auction.highest_bidder_id || auction.current_bid > auction.base_price) {
+                const reason = 'Database anomaly: No bids found, but highest bidder ID or amount is non-default.';
+                console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
+                await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
+                await sendRestrictedWarningEmbed(auction, reason);
+                return;
+            }
+
+            // Genuinely no bids placed
+            console.log(`[SECURITY] Auction finalized: ${aid} concluded with no bids.`);
+            const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
+            if (winChan) {
+                const noBidEmbed = new EmbedBuilder()
+                    .setTitle('⚖️  AUCTION CONCLUDED')
+                    .setColor('#7f8c8d')
+                    .setDescription(`The auction for **${auction.name}** has officially closed.\n\n🛑 **Result:** No bids were placed.`)
+                    .setTimestamp();
+                await winChan.send({ embeds: [noBidEmbed] }).catch(() => { });
+            }
+            updateAuctionDashboard();
+            return;
+        }
+
+        // Verify highest bid data matches auction summary
+        if (highestBid.user_id !== auction.highest_bidder_id || highestBid.amount !== auction.current_bid) {
+            const reason = `Database mismatch: Highest bid in auction_bids history (Amount: ${highestBid.amount}, User: ${highestBid.user_id}) does not match auction record (Amount: ${auction.current_bid}, User: ${auction.highest_bidder_id}).`;
+            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
+            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
+            await sendRestrictedWarningEmbed(auction, reason);
+            return;
+        }
+
+        // Verify winner eligibility (cannot be banned)
+        if (banCache.has(highestBid.user_id)) {
+            const reason = `Highest bidder <@${highestBid.user_id}> is currently banned/blacklisted.`;
+            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
+            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
+            await sendRestrictedWarningEmbed(auction, reason);
+            return;
+        }
+
+        // Winner and bid validated successfully!
         const winnerId = auction.highest_bidder_id;
         const finalAmount = auction.current_bid;
-        // orderId format: AUC{timestamp} — short, unique, clean
+        console.log(`[SECURITY] Winner selected: User ${winnerId} won auction ${aid} with verified bid of ${finalAmount}`);
         const orderId = `AUC${Date.now()}`;
 
         // Public Winner Notification
@@ -1111,9 +1238,11 @@ async function endAuction(aid) {
         } catch (e) {
             console.error('[AUCTION] Payment creation failed:', e.message);
         }
+
+        console.log(`[SECURITY] Auction finalized: ${aid} has concluded.`);
+    } finally {
+        _finalizingAuctions.delete(aid);
     }
-    updateAuctionDashboard();
-    console.log(`[DEADLINE] Auction finalized successfully: ${aid}`);
 }
 
 async function checkAuctionSettlements() {
@@ -1188,6 +1317,7 @@ async function checkAuctionSettlements() {
                     highest_bidder_id: nextBid.user_id,
                     end_time: new Date(Date.now() + 3600000).toISOString() // Restart with 1 hour remaining
                 }).eq('id', aid);
+                console.log(`[SECURITY] Auction started: Re-opened ${aid} after winner default.`);
 
                 const channel = await client.channels.fetch(process.env.AUCTION_CHANNEL_ID).catch(() => null);
                 if (channel) {
@@ -1206,6 +1336,7 @@ async function checkAuctionSettlements() {
                     highest_bidder_id: null,
                     end_time: new Date(Date.now() + 3600000).toISOString()
                 }).eq('id', aid);
+                console.log(`[SECURITY] Auction started: Reset active ${aid} with 0 bids after winner default.`);
             }
 
             // 5. Cleanup
@@ -2698,10 +2829,11 @@ client.on('interactionCreate', async interaction => {
                 if (!auction) return safeReply(interaction, { content: '❌ Auction not found.', components: [] });
 
                 if (auction.status === 'active') {
-                    await endAuction(aid);
+                    await endAuction(aid, true);
                     await safeReply(interaction, { content: `✅ Auction \`${auction.name}\` has been **CLOSED**.`, components: [] });
                 } else {
                     await supabase.from('auctions').update({ status: 'active' }).eq('id', aid);
+                    console.log(`[SECURITY] Auction started: Manually activated ${aid} (${auction.name})`);
                     await safeReply(interaction, { content: `✅ Auction \`${auction.name}\` is now **ACTIVE**.`, components: [] });
                 }
                 updateAuctionDashboard();
@@ -3467,6 +3599,7 @@ client.on('interactionCreate', async interaction => {
                     amount: bidAmt
                 }]);
 
+                console.log(`[SECURITY] Bid accepted: User ${interaction.user.tag} (${interaction.user.id}) placed bid of ${bidAmt} for auction ${auction.id}`);
                 await safeReply(interaction, { content: `✅ Your bid of **${formatPrice(bidAmt)}** has been placed!` });
                 updateAuctionDashboard();
                 return;
