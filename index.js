@@ -184,15 +184,15 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.6.0',
-    codename: 'Pending Guard',
-    date: 'May 20, 2026',
+    version: '4.7.0',
+    codename: 'Blacklist Guard',
+    date: 'May 28, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Security: Added PostgreSQL atomic status transitions and local locks to endAuction.' },
-        { type: 'NEW', desc: 'Security: Implemented strict bid-to-auction cross validation and winner ban-check.' },
-        { type: 'NEW', desc: 'Security: Added NEEDS REVIEW warning state and log alerts for invalid finalize attempts.' },
-        { type: 'NEW', desc: 'Auction: Added Delete Auction Product feature with strict active/bid validation guards.' },
-        { type: 'FIX', desc: 'Auction: Refined Delete Auction Product menu to display and permit pending status only.' }
+        { type: 'NEW', desc: 'Blacklist: Structured ban log now sent to AUCTION_EXPIRED_BAN_LOG_ID on fake bid and expired unpaid auction.' },
+        { type: 'NEW', desc: 'Blacklist: Added /removeblacklistbid slash command for admins to remove bidder blacklist.' },
+        { type: 'NEW', desc: 'Security: /removeblacklistbid is protected by ADMIN_ROLE_ID permission check with usage logging.' },
+        { type: 'FIX', desc: 'Auction: Fake bid banning now also upserts user to banned_users DB for consistent blacklist state.' },
+        { type: 'FIX', desc: 'Auction: Settlement ban log upgraded with full structured embed (auction, product, bid, reason, status).' }
     ]
 };
 
@@ -774,8 +774,32 @@ async function migrateToUnifiedMonitor() {
 
 async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    try { await rest.put(Routes.applicationCommands(client.user.id), { body: [] }); }
-    catch (e) { console.error(e); }
+    const commands = [
+        {
+            name: 'removeblacklistbid',
+            description: 'Remove a bidder from the blacklist and allow them to participate in auctions again.',
+            options: [
+                {
+                    name: 'user',
+                    type: 6, // USER type
+                    description: 'The user to remove from the blacklist.',
+                    required: true
+                },
+                {
+                    name: 'reason',
+                    type: 3, // STRING type
+                    description: 'Reason for removing this user from the blacklist.',
+                    required: false
+                }
+            ]
+        }
+    ];
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('[CMD] Slash commands registered successfully.');
+    } catch (e) {
+        console.error('[CMD] Failed to register slash commands:', e);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -959,6 +983,42 @@ async function updateAuctionDashboard() {
 const _endingAuctions = new Set();
 const _finalizingAuctions = new Set();
 const _notifiedNearing = new Set();
+
+// ─────────────────────────────────────────────────────────────
+// BLACKLIST BAN LOG HELPER
+// Sends a structured, professional log to AUCTION_EXPIRED_BAN_LOG_ID
+// ─────────────────────────────────────────────────────────────
+
+async function sendBlacklistBanLog({ userId, userTag, auctionProduct, auctionId, finalBid, reason, status }) {
+    try {
+        const banLogChanId = process.env.AUCTION_EXPIRED_BAN_LOG_ID;
+        if (!banLogChanId) return;
+        const banLogChan = await client.channels.fetch(banLogChanId).catch(() => null);
+        if (!banLogChan) return;
+
+        const unixNow = Math.floor(Date.now() / 1000);
+        const embed = new EmbedBuilder()
+            .setTitle('AUCTION BLACKLIST — Ban Record')
+            .setColor('#c0392b')
+            .setDescription('A user has been automatically blacklisted from the auction system due to a violation.')
+            .addFields(
+                { name: 'User', value: `<@${userId}>`, inline: true },
+                { name: 'User ID', value: `\`${userId}\``, inline: true },
+                { name: '\u200b', value: '\u200b', inline: true },
+                { name: 'Auction Product', value: `\`${auctionProduct || '—'}\``, inline: true },
+                { name: 'Auction ID', value: `\`${auctionId || '—'}\``, inline: true },
+                { name: 'Final Bid', value: finalBid ? `\`${formatPrice(finalBid)}\`` : '`—`', inline: true },
+                { name: 'Reason', value: `\`${reason}\``, inline: false },
+                { name: 'Time', value: `<t:${unixNow}:F>`, inline: true },
+                { name: 'Status Blacklist', value: '`ACTIVE — PERMANENTLY BANNED`', inline: true }
+            )
+            .setTimestamp();
+
+        await banLogChan.send({ embeds: [embed] }).catch(() => {});
+    } catch (e) {
+        console.warn('[BLACKLIST-LOG] Failed to send ban log:', e.message);
+    }
+}
 
 async function sendRestrictedWarningEmbed(auction, reason) {
     try {
@@ -1295,9 +1355,24 @@ async function checkAuctionSettlements() {
 
             console.log(`[SETTLEMENT] Auction ${aid} winner ${userId} failed to pay. Processing ban and reroll...`);
 
+            // Fetch auction details for ban log
+            const { data: aucDetail } = await supabase.from('auctions').select('name, product_id, current_bid').eq('id', aid).maybeSingle();
+
             // 1. Permanent Ban
-            await supabase.from('banned_users').upsert([{ id: userId, reason: 'Auction Payment Default (Fake/Troll Bid)', created_at: new Date().toISOString() }]);
-            banCache.set(userId, 'Auction Payment Default (Fake/Troll Bid)'); // Sync cache instantly
+            const banReason = 'Auction Payment Default — Winner failed to complete payment within 1 hour.';
+            await supabase.from('banned_users').upsert([{ id: userId, reason: banReason, created_at: new Date().toISOString() }]);
+            banCache.set(userId, banReason); // Sync cache instantly
+
+            // Send structured ban log to AUCTION_EXPIRED_BAN_LOG_ID
+            sendBlacklistBanLog({
+                userId,
+                userTag: pay.user_id,
+                auctionProduct: aucDetail?.name || pay.product_id || '—',
+                auctionId: aid,
+                finalBid: pay.amount || aucDetail?.current_bid || 0,
+                reason: banReason,
+                status: 'ACTIVE — PERMANENTLY BANNED'
+            }).catch(() => {});
 
             // 2. Remove fake bids
             await supabase.from('auction_bids').delete().eq('auction_id', aid).eq('user_id', userId);
@@ -1975,9 +2050,95 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // ── SLASH COMMANDS (disabled) ─────────────────────────
+        // ── SLASH COMMANDS ────────────────────────────────────
         if (interaction.isChatInputCommand()) {
-            return safeReply(interaction, { content: 'Slash commands are disabled. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
+            // ── /removeblacklistbid ───────────────────────────
+            if (interaction.commandName === 'removeblacklistbid') {
+                await safeDefer(interaction, true);
+
+                // Permission check: Admin role only
+                const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
+                const isAdminCmd = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
+                if (!isAdminCmd) {
+                    return safeReply(interaction, {
+                        content: '❌ **Access Denied.** Only administrators with the required role can use this command.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+
+                const targetUser = interaction.options.getUser('user');
+                const removeReason = interaction.options.getString('reason') || 'No reason provided.';
+
+                if (!targetUser) {
+                    return safeReply(interaction, { content: '❌ Please specify a valid user.', flags: [MessageFlags.Ephemeral] });
+                }
+
+                // Check if user is actually blacklisted
+                const { data: banRecord } = await supabase
+                    .from('banned_users')
+                    .select('*')
+                    .eq('id', targetUser.id)
+                    .maybeSingle();
+
+                const isCachedBanned = banCache.has(targetUser.id);
+
+                if (!banRecord && !isCachedBanned) {
+                    return safeReply(interaction, {
+                        content: `⚠️ User <@${targetUser.id}> (\`${targetUser.id}\`) is not currently blacklisted in the auction system.`,
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+
+                // Remove from database
+                const { error: delErr } = await supabase.from('banned_users').delete().eq('id', targetUser.id);
+                if (delErr) {
+                    return safeReply(interaction, {
+                        content: `❌ Failed to remove blacklist from database: \`${delErr.message}\``,
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+
+                // Remove from memory cache
+                banCache.delete(targetUser.id);
+
+                console.log(`[BLACKLIST] Removed blacklist for user ${targetUser.tag} (${targetUser.id}) by Admin ${interaction.user.tag} (${interaction.user.id}). Reason: ${removeReason}`);
+
+                // Send admin action log to AUCTION_EXPIRED_BAN_LOG_ID
+                const banLogChanId = process.env.AUCTION_EXPIRED_BAN_LOG_ID;
+                if (banLogChanId) {
+                    const banLogChan = await client.channels.fetch(banLogChanId).catch(() => null);
+                    if (banLogChan) {
+                        const unixNow = Math.floor(Date.now() / 1000);
+                        const previousReason = banRecord?.reason || isCachedBanned ? banCache.get(targetUser.id) : '—';
+                        const logEmbed = new EmbedBuilder()
+                            .setTitle('AUCTION BLACKLIST — Blacklist Removed')
+                            .setColor('#27ae60')
+                            .setDescription('An administrator has manually removed a user from the auction blacklist.')
+                            .addFields(
+                                { name: 'Target User', value: `<@${targetUser.id}>`, inline: true },
+                                { name: 'User ID', value: `\`${targetUser.id}\``, inline: true },
+                                { name: '\u200b', value: '\u200b', inline: true },
+                                { name: 'Removed By', value: `<@${interaction.user.id}>`, inline: true },
+                                { name: 'Admin ID', value: `\`${interaction.user.id}\``, inline: true },
+                                { name: '\u200b', value: '\u200b', inline: true },
+                                { name: 'Previous Ban Reason', value: `\`${previousReason || '—'}\``, inline: false },
+                                { name: 'Removal Reason', value: `\`${removeReason}\``, inline: false },
+                                { name: 'Time', value: `<t:${unixNow}:F>`, inline: true },
+                                { name: 'Status Blacklist', value: '`REMOVED — ACCESS RESTORED`', inline: true }
+                            )
+                            .setTimestamp();
+                        await banLogChan.send({ embeds: [logEmbed] }).catch(() => {});
+                    }
+                }
+
+                return safeReply(interaction, {
+                    content: `✅ Blacklist for <@${targetUser.id}> has been successfully removed.\nThe user can now participate in auctions again.`,
+                    flags: [MessageFlags.Ephemeral]
+                });
+            }
+
+            // Unknown slash command fallback
+            return safeReply(interaction, { content: 'This command is not available. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
         }
 
         // ═════════════════════════════════════════════════════
@@ -3646,25 +3807,49 @@ client.on('interactionCreate', async interaction => {
                 if (isNaN(bidAmt)) {
                     // Anti-fake bid logic: Automated Ban for non-numeric troll bids
                     try {
-                        const banReason = `Automatic Banned: Troll/Fake Bid in Auction System (Non-numeric input: ${bidStr})`;
-                        await interaction.member.ban({ reason: banReason });
+                        const fakeBidReason = `Fake/Troll Bid — Invalid non-numeric input submitted to auction bid system. Input: "${bidStr}"`;
+
+                        // 1. Discord server ban
+                        await interaction.member.ban({ reason: fakeBidReason }).catch(() => {});
+
+                        // 2. Blacklist in database + memory cache
+                        await supabase.from('banned_users').upsert([{ id: interaction.user.id, reason: fakeBidReason, created_at: new Date().toISOString() }]);
+                        banCache.set(interaction.user.id, fakeBidReason);
+
                         await safeReply(interaction, { content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
 
-                        // Send log to restricted-users channel
-                        const logChan = await client.channels.fetch('1503766353721430036').catch(() => null);
+                        // 3. Send log to restricted-users channel
+                        const logChan = await client.channels.fetch(process.env.RESTRICTED_LOG_CHANNEL_ID || '1503766353721430036').catch(() => null);
                         if (logChan) {
                             const embed = new EmbedBuilder()
-                                .setTitle('⛔ Banned User: Fake Bid')
-                                .setColor('#ff4757')
+                                .setTitle('Security Enforcement — Fake Bid Detected')
+                                .setColor('#c0392b')
                                 .addFields(
-                                    { name: 'User', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
-                                    { name: 'ID', value: `\`${interaction.user.id}\``, inline: true },
+                                    { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
+                                    { name: 'User ID', value: `\`${interaction.user.id}\``, inline: true },
+                                    { name: '\u200b', value: '\u200b', inline: true },
                                     { name: 'Reason', value: 'Fake/Troll Bid (Invalid Input)', inline: false },
-                                    { name: 'Input', value: `\`${bidStr}\``, inline: true }
+                                    { name: 'Input Submitted', value: `\`${bidStr}\``, inline: true },
+                                    { name: 'Action Taken', value: '`Server Ban + Blacklist`', inline: true }
                                 )
                                 .setTimestamp();
-                            await logChan.send({ embeds: [embed] });
+                            await logChan.send({ embeds: [embed] }).catch(() => {});
                         }
+
+                        // 4. Send structured blacklist log to AUCTION_EXPIRED_BAN_LOG_ID
+                        // Fetch current active auction for context
+                        const { data: activeAuc } = await supabase.from('auctions').select('id, name, product_id, current_bid').eq('status', 'active').maybeSingle();
+                        sendBlacklistBanLog({
+                            userId: interaction.user.id,
+                            userTag: interaction.user.tag,
+                            auctionProduct: activeAuc?.name || '—',
+                            auctionId: activeAuc?.id || '—',
+                            finalBid: 0,
+                            reason: fakeBidReason,
+                            status: 'ACTIVE — PERMANENTLY BANNED'
+                        }).catch(() => {});
+
+                        console.log(`[SECURITY] Fake bid ban executed: ${interaction.user.tag} (${interaction.user.id}) | Input: "${bidStr}"`);
                     } catch (e) { console.error('[AUCTION] Failed to ban troll:', e.message); }
                     return;
                 }
