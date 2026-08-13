@@ -8,17 +8,14 @@ const {
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const supabase = require('./supabaseClient');
-
-// HTTP Health Check Server for Render Free Tier Web Service
 const http = require('http');
+
+// HTTP Keep-Alive Server for Free Web Services (Render / Koyeb)
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Quantumblox Discord Bot is Online!');
-}).listen(PORT, () => {
-    console.log(`[HTTP] Health check server running on port ${PORT}`);
-});
+    res.end('Bot QUANTUMBLOX is online 24/7!\n');
+}).listen(PORT, () => console.log(`[HTTP] Keep-Alive Web Server running on port ${PORT}`));
 
 // ─────────────────────────────────────────────────────────────
 // HELPERS
