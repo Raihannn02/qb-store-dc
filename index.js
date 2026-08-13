@@ -10,6 +10,16 @@ const path = require('path');
 const axios = require('axios');
 const supabase = require('./supabaseClient');
 
+// HTTP Health Check Server for Render Free Tier Web Service
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Quantumblox Discord Bot is Online!');
+}).listen(PORT, () => {
+    console.log(`[HTTP] Health check server running on port ${PORT}`);
+});
+
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
