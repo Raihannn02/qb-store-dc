@@ -102,21 +102,17 @@ function isValidEmoji(str) {
     return false;
 }
 
-async function withRetry(fn, attempts = 3, delayMs = 3000) {
+async function withRetry(fn, attempts = 3, delayMs = 1000) {
     for (let i = 0; i < attempts; i++) {
         try { return await fn(); }
         catch (err) {
-            const isTimeout = err.code === 'UND_ERR_CONNECT_TIMEOUT' || err.message?.includes('Connect Timeout');
             const last = i === attempts - 1;
-            if (isTimeout && !last) {
+            if (!last) {
                 const backoff = delayMs * (i + 1);
-                console.warn(`[RETRY] Timeout on attempt ${i + 1}/${attempts} — waiting ${backoff}ms...`);
+                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message || err} — retrying in ${backoff}ms...`);
                 await new Promise(r => setTimeout(r, backoff));
-            } else if (!last) {
-                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message} — retrying...`);
-                await new Promise(r => setTimeout(r, delayMs));
             } else {
-                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message} — giving up.`);
+                console.warn(`[RETRY] Attempt ${i + 1}/${attempts} failed: ${err.message || err} — giving up.`);
                 throw err;
             }
         }
@@ -184,15 +180,14 @@ let dashboardMessageId = null; // Memory cache, but primary id is in config.json
 // ─────────────────────────────────────────────────────────────
 
 const BOT_VERSION = {
-    version: '4.7.0',
-    codename: 'Blacklist Guard',
-    date: 'May 28, 2026',
+    version: '5.0.0',
+    codename: 'Grow A Garden Update',
+    date: 'August 13, 2026',
     changelog: [
-        { type: 'NEW', desc: 'Blacklist: Structured ban log now sent to AUCTION_EXPIRED_BAN_LOG_ID on fake bid and expired unpaid auction.' },
-        { type: 'NEW', desc: 'Blacklist: Added /removeblacklistbid slash command for admins to remove bidder blacklist.' },
-        { type: 'NEW', desc: 'Security: /removeblacklistbid is protected by ADMIN_ROLE_ID permission check with usage logging.' },
-        { type: 'FIX', desc: 'Auction: Fake bid banning now also upserts user to banned_users DB for consistent blacklist state.' },
-        { type: 'FIX', desc: 'Auction: Settlement ban log upgraded with full structured embed (auction, product, bid, reason, status).' }
+        { type: 'NEW', desc: 'Platform: Migrated from Pixel World to Grow A Garden 2 product catalog.' },
+        { type: 'NEW', desc: 'Live Stock: Database monitor now displays Grow A Garden 2 products.' },
+        { type: 'FIX', desc: 'Product PW renamed to Product Stock for clarity.' },
+        { type: 'SYSTEM', desc: 'Removed: Auction zone features (bid blacklist, auction, win auction, bid delivery, bid transaction, product bid).' }
     ]
 };
 
@@ -200,7 +195,7 @@ const BOT_VERSION = {
 // STATE CACHE
 // ─────────────────────────────────────────────────────────────
 
-let AUCTION_CACHE = { active: false, name: '' };
+// Auction system removed in v5.0.0
 
 // ── Product Cache (30s TTL) ──
 let _productCache = { data: null, ts: 0 };
@@ -225,48 +220,7 @@ let _lastDashboardHash = '';
 let _lastDashboardEditAt = 0;
 let _lastAuctionHash = '';
 
-// In-memory ban cache for ultra-fast (0ms) interaction security
-const banCache = new Map();
-let _lastBanCount = -1;
-async function refreshBanCache() {
-    try {
-        const { data } = await supabase.from('banned_users').select('id, reason');
-        banCache.clear();
-        
-        const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-        const guild = client.guilds.cache.first();
-
-        if (data) {
-            for (const b of data) {
-                let isAdmin = false;
-                if (guild) {
-                    try {
-                        const member = await guild.members.fetch(b.id).catch(() => null);
-                        if (member && member.roles.cache.has(adminRoleId)) {
-                            isAdmin = true;
-                            console.log(`[SECURITY] Admin bypass detected: Automatically unbanning admin ${member.user.tag} (${b.id}) from database blacklist.`);
-                            await supabase.from('banned_users').delete().eq('id', b.id);
-                        }
-                    } catch (err) {
-                        // Silent
-                    }
-                }
-                
-                if (!isAdmin) {
-                    banCache.set(b.id, b.reason || 'Violation of terms');
-                }
-            }
-        }
-        
-        // Only log when count changes to avoid spam
-        if (banCache.size !== _lastBanCount) {
-            console.log(`[BAN-CACHE] Updated: ${banCache.size} banned users cached.`);
-            _lastBanCount = banCache.size;
-        }
-    } catch (e) {
-        if (!e.message?.includes('Connect Timeout')) console.warn('[BAN-CACHE] Refresh failed:', e.message);
-    }
-}
+// Ban cache removed — auction system removed in v5.0.0
 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD SYNC & LOCKS
@@ -363,20 +317,435 @@ async function checkSchemaSupport() {
         console.warn('[SCHEMA] Could not verify sold_archive table.');
     }
 
-    // Ensure banner_url column exists
+    // Ensure orders table exists
     try {
-        const { error } = await supabase.from('products').select('banner_url').limit(1);
-        if (error && error.code === '42703') {
-            console.warn('[SCHEMA] "banner_url" column missing in "products" table. Please add it via Supabase Dashboard.');
-            console.warn('[SCHEMA] SQL: ALTER TABLE products ADD COLUMN banner_url text;');
-        }
-        
-        const { error: err2 } = await supabase.from('auctions').select('banner_url').limit(1);
-        if (err2 && err2.code === '42703') {
-            console.warn('[SCHEMA] "banner_url" column missing in "auctions" table. Please add it via Supabase Dashboard.');
-            console.warn('[SCHEMA] SQL: ALTER TABLE auctions ADD COLUMN banner_url text;');
+        const { error } = await supabase.from('orders').select('id').limit(1);
+        if (error && error.code === '42P01') {
+            console.warn('[SCHEMA] orders table missing. Please run SQL to create orders table.');
+            console.warn('[SCHEMA] SQL: CREATE TABLE orders (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, order_id text UNIQUE, product_id text, product_name text, buyer_id text, buyer_tag text, roblox_username text, qty int DEFAULT 1, amount numeric DEFAULT 0, status text DEFAULT \'Pending\', message_id text, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());');
+        } else {
+            console.log('[SCHEMA] orders table ready.');
         }
     } catch {}
+}
+
+const ROBLOX_PAYMENTS_CACHE = new Map();
+const ORDER_CHANNEL_ID = process.env.WAITING_LIST_CHANNEL_ID || process.env.ORDER_CHANNEL_ID || '1537397124445245562';
+
+function isOrderAdmin(interaction) {
+    if (!interaction) return false;
+    const adminRoleId = process.env.ADMIN_ROLE_ID;
+    if (!adminRoleId) return true;
+    if (interaction.member?.roles) {
+        if (Array.isArray(interaction.member.roles)) {
+            return interaction.member.roles.includes(adminRoleId);
+        }
+        if (interaction.member.roles.cache) {
+            return interaction.member.roles.cache.has(adminRoleId);
+        }
+    }
+    if (interaction.memberPermissions?.has('Administrator') || interaction.member?.permissions?.has?.('Administrator')) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Sends a Stock Alert notification to Channel ID 1537401300231266314 (📦 stock-alert)
+ * @param {string} productName - Name of the product
+ * @param {number} addedAmount - Amount of stock added
+ */
+async function sendStockAlertNotification(productName, addedAmount) {
+    if (!productName || !addedAmount || addedAmount <= 0) return;
+
+    const stockAlertChannelId = process.env.STOCK_ALERT_CHANNEL_ID || '1537401300231266314';
+    try {
+        const channel = await client.channels.fetch(stockAlertChannelId).catch(() => null);
+        if (!channel) {
+            console.warn(`[STOCK ALERT] Channel ${stockAlertChannelId} not found.`);
+            return;
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor('#00b894')
+            .setDescription(`${productName} has stocked ( + ${addedAmount} items )`);
+
+        await channel.send({
+            content: '@everyone',
+            embeds: [embed],
+            allowedMentions: { parse: ['everyone'] }
+        }).catch(err => {
+            console.error(`[STOCK ALERT FAIL] Could not send to ${stockAlertChannelId}:`, err.message);
+        });
+
+        console.log(`[STOCK ALERT] Alert sent: ${productName} (+${addedAmount} items)`);
+    } catch (e) {
+        console.error(`[STOCK ALERT ERROR]`, e.message);
+    }
+}
+
+const ARCHIVED_ORDERS_SET = new Set();
+
+async function safeDeferUpdate(interaction) {
+    try {
+        if (!interaction.deferred && !interaction.replied) {
+            await interaction.deferUpdate().catch(() => null);
+        }
+    } catch (e) {
+        console.warn('[INTERACTION] deferUpdate warning:', e.message);
+    }
+}
+
+async function safeUpdate(interaction, options) {
+    try {
+        if (interaction.deferred || interaction.replied) {
+            return await interaction.editReply(options).catch(async () => {
+                if (interaction.message && typeof interaction.message.edit === 'function') {
+                    return await interaction.message.edit(options).catch(() => null);
+                }
+            });
+        } else {
+            return await interaction.update(options).catch(async () => {
+                if (interaction.message && typeof interaction.message.edit === 'function') {
+                    return await interaction.message.edit(options).catch(() => null);
+                }
+            });
+        }
+    } catch (e) {
+        if (interaction.message && typeof interaction.message.edit === 'function') {
+            return await interaction.message.edit(options).catch(() => null);
+        }
+    }
+}
+
+async function safeReply(interaction, options) {
+    try {
+        if (interaction.deferred || interaction.replied) {
+            return await interaction.followUp(options).catch(() => null);
+        } else {
+            return await interaction.reply(options).catch(() => null);
+        }
+    } catch (e) {
+        console.warn('[INTERACTION] safeReply warning:', e.message);
+    }
+}
+
+async function dispatchOrderTicket(pay, robloxUsername, buyerUser) {
+    try {
+        const orderId = pay.invoice_id;
+        const { data: p } = await supabase.from('products').select('*').eq('id', pay.product_id).maybeSingle();
+        const productName = p?.name || pay.product_id;
+        const buyerTag = buyerUser?.tag || buyerUser?.username || 'Unknown';
+        const buyerId = pay.user_id;
+        const rUsername = robloxUsername || pay.roblox_username || ROBLOX_PAYMENTS_CACHE.get(orderId) || 'N/A';
+        const unixNow = Math.floor(Date.now() / 1000);
+
+        const orderRecord = {
+            order_id: orderId,
+            product_id: pay.product_id,
+            product_name: productName,
+            buyer_id: buyerId,
+            buyer_tag: buyerTag,
+            roblox_username: rUsername,
+            qty: pay.qty,
+            amount: pay.amount,
+            status: 'Pending Send',
+            created_at: new Date().toISOString()
+        };
+
+        const { error: upsertErr } = await supabase.from('orders').upsert([orderRecord], { onConflict: 'order_id' });
+        if (upsertErr) {
+            console.error('[ORDER DISPATCH] Supabase orders upsert error:', upsertErr.message);
+        }
+
+        const channel = await client.channels.fetch(ORDER_CHANNEL_ID).catch(err => {
+            console.error(`[ORDER DISPATCH] Failed to fetch channel ${ORDER_CHANNEL_ID}:`, err.message);
+            return null;
+        });
+
+        if (!channel) {
+            console.error(`❌ [ORDER DISPATCH CRITICAL ERROR] Target Order Channel ID ${ORDER_CHANNEL_ID} not found or bot lacks View/Send permissions!`);
+            return false;
+        }
+
+        const fmtAmount = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🛒 NEW ORDER \u2014 ${orderId}`)
+            .setColor('#f1c40f')
+            .setDescription('Pembayaran berhasil! Silakan Owner/Admin mengirimkan item ke Username Roblox di bawah, lalu tekan tombol **Done / Complete** jika selesai.')
+            .addFields(
+                { name: '👤 Username Roblox', value: `\`\`\`${rUsername}\`\`\``, inline: false },
+                { name: '📦 Detail Produk', value: `**${productName}** (\`${pay.product_id}\`)`, inline: true },
+                { name: '🔢 Jumlah', value: `\`${pay.qty} Pcs\``, inline: true },
+                { name: '💰 Total Transaksi', value: `\`${fmtAmount}\``, inline: true },
+                { name: '💰 Payment Status', value: `🟢 **Paid (Automatic)**`, inline: true },
+                { name: '🚚 Delivery Status', value: `🟡 **Pending Send**`, inline: true },
+                { name: '👤 Pembeli', value: `<@${buyerId}> (\`${buyerTag}\`)`, inline: true },
+                { name: '🆔 Order ID', value: `\`${orderId}\``, inline: true },
+                { name: '🕐 Waktu Order', value: `<t:${unixNow}:F> (<t:${unixNow}:R>)`, inline: false }
+            )
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`btn_ord_proc_${orderId}`).setLabel('⚙️ Processing').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`btn_ord_done_${orderId}`).setLabel('✅ Done / Complete').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`btn_ord_cancel_${orderId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Danger)
+        );
+
+        const msg = await channel.send({ embeds: [embed], components: [row] });
+        console.log(`✅ [ORDER DISPATCH SUCCESS] Ticket for Order ${orderId} (Roblox: "${rUsername}") sent to channel ${channel.name} (${ORDER_CHANNEL_ID})`);
+
+        if (msg) {
+            try {
+                await supabase.from('orders').update({ message_id: msg.id }).eq('order_id', orderId);
+            } catch (e) { }
+        }
+        return true;
+    } catch (err) {
+        console.error(`❌ [ORDER DISPATCH CRITICAL ERROR] Failed to send order ticket for ${pay?.invoice_id}:`, err);
+        return false;
+    }
+}
+
+async function processOrderPaymentSuccess(pay, robloxUsername, buyerUser) {
+    const orderId = pay.invoice_id;
+
+    // Delete from pending_payments FIRST to guarantee single execution & prevent backlog spam
+    await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
+
+    const { data: p } = await supabase.from('products').select('*').eq('id', pay.product_id).maybeSingle();
+    const currentStock = parseInt(p?.stock) || 0;
+
+    if (p && currentStock > 0) {
+        const newStock = Math.max(0, currentStock - pay.qty);
+        await supabase.from('products').update({ stock: newStock }).eq('id', pay.product_id);
+        invalidateProductCache();
+    }
+
+    const deliver = [`${pay.qty}x ${p?.name || pay.product_id}`];
+    archiveSoldData({
+        orderId,
+        productId: pay.product_id,
+        productName: p?.name || pay.product_id,
+        buyerId: pay.user_id,
+        buyerTag: buyerUser?.tag || buyerUser?.username || 'Unknown',
+        items: deliver,
+        qty: pay.qty,
+        amount: pay.amount
+    });
+
+    const rUsername = robloxUsername || pay.roblox_username || ROBLOX_PAYMENTS_CACHE.get(orderId) || 'N/A';
+
+    // Dispatch ticket directly to Discord Waiting List Channel
+    const dispatchOk = await dispatchOrderTicket(pay, rUsername, buyerUser);
+
+    const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
+    const isAuction = pay.invoice_id.startsWith('AUC');
+
+    // ── 1. Send History Log (HISTORY_LOG_CHANNEL_ID) ──
+    const histChannelId = process.env.HISTORY_LOG_CHANNEL_ID || '1499793970241474684';
+    if (histChannelId) {
+        const histChannel = await client.channels.fetch(histChannelId).catch(() => null);
+        if (histChannel) {
+            await histChannel.send({
+                embeds: [new EmbedBuilder()
+                    .setTitle('Order Completed')
+                    .setColor('#2d3436')
+                    .addFields(
+                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                        { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                        { name: 'Product', value: p?.name || pay.product_id, inline: true },
+                        { name: 'Qty', value: `${pay.qty}x`, inline: true },
+                        { name: 'Total', value: fmt, inline: true },
+                        { name: 'Process', value: 'Automatic', inline: true }
+                    )
+                    .setTimestamp()]
+            }).catch(() => null);
+        }
+    }
+
+    // ── 2. Send Payment Log (PAYMENT_LOG_CHANNEL_ID) ──
+    const payLogChannelId = process.env.PAYMENT_LOG_CHANNEL_ID || '1501040112065319054';
+    if (payLogChannelId) {
+        const payLogChannel = await client.channels.fetch(payLogChannelId).catch(() => null);
+        if (payLogChannel) {
+            await payLogChannel.send({
+                embeds: [new EmbedBuilder()
+                    .setTitle('Payment Received')
+                    .setColor('#0099ff')
+                    .addFields(
+                        { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                        { name: 'Buyer', value: `<@${pay.user_id}>`, inline: true },
+                        { name: 'Qty', value: `${pay.qty}x`, inline: true },
+                        { name: 'Total', value: fmt, inline: true },
+                        { name: 'Status', value: 'Completed', inline: true }
+                    )
+                    .setTimestamp()]
+            }).catch(() => null);
+        }
+    }
+
+    // ── 3. Assign Customer Role ──
+    const costumerRoleId = process.env.COSTUMER_ROLE_ID;
+    if (costumerRoleId && pay.user_id) {
+        client.guilds.cache.forEach(async guild => {
+            const member = await guild.members.fetch(pay.user_id).catch(() => null);
+            if (member) {
+                await member.roles.add(costumerRoleId).catch(() => null);
+            }
+        });
+    }
+
+    // DM Buyer receipt
+    if (buyerUser) {
+        const buyerEmbed = new EmbedBuilder()
+            .setTitle(isAuction ? '🏆  Auction Item Delivered' : '✅  Order Confirmed & Paid')
+            .setColor(isAuction ? '#f1c40f' : '#00b894')
+            .setDescription(isAuction
+                ? `Congratulations! Your auction item for **${pay.product_id.replace('AUCTION: ', '')}** has been delivered.`
+                : 'Pembayaran Anda telah berhasil! Pesanan Anda telah masuk ke daftar tunggu pengiriman. Admin/Owner akan segera memproses pengiriman ke Username Roblox Anda.')
+            .addFields(
+                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
+                { name: 'Product', value: p?.name || pay.product_id, inline: true },
+                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
+                { name: 'Total Paid', value: fmt, inline: true },
+                { name: 'Delivery Status', value: '🟡 **Pending Send**', inline: true }
+            )
+            .setTimestamp();
+
+        await buyerUser.send({ embeds: [buyerEmbed] }).catch(() => { });
+    }
+
+    return { success: true, dispatchOk };
+}
+
+async function autoCheckPendingPayments() {
+    try {
+        const { data: pendings, error } = await supabase.from('pending_payments').select('*').limit(30);
+
+        // 1. Process pending_payments
+        if (pendings && pendings.length > 0) {
+            const FIVE_MINUTES_MS = 5 * 60 * 1000;
+            const now = Date.now();
+
+            for (const pay of pendings) {
+                try {
+                    // Idempotency check: if order is already in orders table with status != 'Pending', remove from pending_payments and skip
+                    const { data: existingOrder } = await supabase.from('orders').select('order_id, status').eq('order_id', pay.invoice_id).maybeSingle();
+                    if (existingOrder && existingOrder.status !== 'Pending') {
+                        await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+                        continue;
+                    }
+
+                    const res = await axios.get(`https://app.pakasir.com/api/transactiondetail`, {
+                        params: {
+                            project: process.env.PAKASIR_SLUG,
+                            amount: pay.amount,
+                            order_id: pay.invoice_id,
+                            api_key: process.env.PAKASIR_API_KEY
+                        },
+                        timeout: 10000
+                    }).catch(() => null);
+
+                    if (res?.data?.transaction?.status === 'completed') {
+                        console.log(`[AUTO PAYMENT CHECK] Payment ${pay.invoice_id} verified as completed! Auto-processing order...`);
+                        const buyerUser = await client.users.fetch(pay.user_id).catch(() => null);
+                        const rUsername = pay.roblox_username || ROBLOX_PAYMENTS_CACHE.get(pay.invoice_id) || 'N/A';
+                        await processOrderPaymentSuccess(pay, rUsername, buyerUser);
+                        continue;
+                    }
+
+                    // Check 5-minute expiration
+                    const createdAt = new Date(pay.created_at || now).getTime();
+                    if (now - createdAt > FIVE_MINUTES_MS) {
+                        console.log(`[AUTO CANCEL] Order ${pay.invoice_id} expired (> 5 minutes unpaid). Auto-cancelling...`);
+                        await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
+                        await supabase.from('orders').update({ status: 'Cancelled' }).eq('order_id', pay.invoice_id).eq('status', 'Pending');
+                    }
+                } catch (err) {
+                    console.error(`[AUTO PAYMENT CHECK ERROR] Order ${pay.invoice_id}:`, err.message);
+                }
+            }
+        }
+
+        // 2. Clean up orphaned 'Pending' orders in orders table older than 5 minutes
+        const fiveMinsAgoISO = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        await supabase.from('orders').update({ status: 'Cancelled' }).eq('status', 'Pending').lt('created_at', fiveMinsAgoISO).catch(() => null);
+
+    } catch (e) {
+        // silent error handling
+    }
+}
+
+async function renderOrderManager(filterStatus = 'ACTIVE', searchQuery = null) {
+    let query = supabase.from('orders').select('*').order('created_at', { ascending: false });
+
+    if (searchQuery) {
+        query = query.or(`roblox_username.ilike.%${searchQuery}%,order_id.ilike.%${searchQuery}%`);
+    } else if (filterStatus === 'Pending' || filterStatus === 'Pending Send') {
+        query = query.in('status', ['Pending', 'Pending Send']);
+    } else if (filterStatus === 'Processing') {
+        query = query.eq('status', 'Processing');
+    } else if (filterStatus === 'Done') {
+        query = query.eq('status', 'Done');
+    } else if (filterStatus === 'ACTIVE') {
+        query = query.in('status', ['Pending', 'Pending Send', 'Processing']);
+    }
+
+    const { data: orders } = await query.limit(15);
+    const orderList = orders || [];
+
+    const statusCountsRes = await supabase.from('orders').select('status');
+    const allSt = statusCountsRes.data || [];
+    const countPending = allSt.filter(o => o.status === 'Pending' || o.status === 'Pending Send').length;
+    const countProc = allSt.filter(o => o.status === 'Processing').length;
+    const countDone = allSt.filter(o => o.status === 'Done').length;
+
+    let desc = `### 📦 Grow A Garden 2 \u2014 Order Manager\n`;
+    desc += `📊 **Summary:** 🟡 Pending Send: \`${countPending}\` | 🔵 Processing: \`${countProc}\` | 🟢 Done: \`${countDone}\`\n\n`;
+    desc += filterStatus === 'ACTIVE' ? `🔍 **Viewing:** \`Active Queue (Pending Send + Processing)\`\n\n` : `🔍 **Filter Status:** \`${filterStatus}\`\n\n`;
+
+    if (searchQuery) desc += `🔎 **Pencarian:** "${searchQuery}" (${orderList.length} hasil)\n\n`;
+
+    if (orderList.length === 0) {
+        desc += `*Tidak ada orderan ditemukan.*`;
+    } else {
+        orderList.forEach((o, i) => {
+            const stEmoji = o.status === 'Processing' ? '🔵' : o.status === 'Done' ? '🟢' : o.status === 'Cancelled' ? '🔴' : '🟡';
+            const fmtAmt = `Rp. ${new Intl.NumberFormat('id-ID').format(o.amount || 0)}`;
+            desc += `**${i + 1}. \`${o.order_id}\`** • Roblox: \`${o.roblox_username || 'N/A'}\`\n`;
+            desc += `└ Produk: **${o.product_name}** (${o.qty}x) • Total: \`${fmtAmt}\` • Status: ${stEmoji} \`${o.status}\`\n`;
+        });
+    }
+
+    const embed = new EmbedBuilder()
+        .setTitle('📦 Order Management System')
+        .setColor('#2b2d31')
+        .setDescription(desc)
+        .setTimestamp();
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId('sel_order_filter')
+        .setPlaceholder('Filter berdasarkan Status Order...')
+        .addOptions([
+            { label: 'Active Queue (Pending Send + Processing)', description: 'Sembunyikan orderan yang sudah Done', value: 'filter_ACTIVE', emoji: '📋' },
+            { label: 'Pending Send Only', description: `Orderan belum dikirim (${countPending})`, value: 'filter_Pending', emoji: '🟡' },
+            { label: 'Processing Only', description: `Orderan sedang diproses (${countProc})`, value: 'filter_Processing', emoji: '🔵' },
+            { label: 'Done Only (Archived)', description: `Arsip orderan selesai (${countDone})`, value: 'filter_Done', emoji: '🟢' },
+            { label: 'All History', description: 'Semua riwayat transaksi', value: 'filter_ALL', emoji: '📂' }
+        ]);
+
+    const btnSearch = new ButtonBuilder()
+        .setCustomId('btn_order_search')
+        .setLabel('Search Roblox / Order ID')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('🔎');
+
+    const rowMenu = new ActionRowBuilder().addComponents(menu);
+    const rowBtn = new ActionRowBuilder().addComponents(btnSearch);
+
+    return { embeds: [embed], components: [rowMenu, rowBtn] };
 }
 
 // Archive sold stock items to sold_archive table
@@ -524,7 +893,24 @@ async function migrateSoldArchive() {
 async function safeInsertProduct(payload) {
     const data = { ...payload };
     if (!SCHEMA_SUPPORT.system_type) delete data.system_type;
-    return supabase.from('products').insert([data]);
+
+    try {
+        let res = await withRetry(() => supabase.from('products').insert([data]), 3, 1000).catch(e => ({ error: e }));
+        if (res?.error && (res.error.code === '42703' || res.error.message?.includes('min_buy'))) {
+            console.warn('[SCHEMA] "min_buy" column missing in database table "products". Retrying insert without min_buy field.');
+            console.warn('[SCHEMA] To store Min Buy in DB, run in Supabase SQL Editor: ALTER TABLE products ADD COLUMN min_buy int DEFAULT 1;');
+            delete data.min_buy;
+            res = await withRetry(() => supabase.from('products').insert([data]), 3, 1000).catch(e => ({ error: e }));
+        }
+        return res || { error: null };
+    } catch (e) {
+        // If error has code 42703 and data had min_buy, attempt fallback without min_buy
+        if (data.min_buy !== undefined) {
+            delete data.min_buy;
+            return await withRetry(() => supabase.from('products').insert([data]), 3, 1000).catch(e2 => ({ error: e2 }));
+        }
+        return { error: e };
+    }
 }
 
 function isAuctionProduct(p) {
@@ -576,7 +962,7 @@ function saveConfig(data) {
 async function updateUnifiedMonitor() {
     await withLock('unified_monitor', async () => {
         const config = loadConfig();
-        const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
+        const dbChannelId = process.env.PRODUCT_CHANNEL_ID || process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
         if (!dbChannelId) { console.warn('[UNIFIED] Channel ID not set.'); return; }
 
         const channel = await client.channels.fetch(dbChannelId).catch(() => null);
@@ -585,58 +971,39 @@ async function updateUnifiedMonitor() {
         const allProducts = await getCachedProducts();
         const products = (allProducts || []).filter(p => !isAuctionProduct(p));
 
-        // Fetch stock for all products in parallel
-        const stockResults = await Promise.all(
-            products.map(p =>
-                supabase.from('stock').select('*').eq('product_id', p.id)
-                    .order('created_at', { ascending: false })
-                    .then(r => ({ pid: p.id, stock: r.data || [] }))
-            )
-        );
-        const stockMap = {};
-        stockResults.forEach(r => { stockMap[r.pid] = r.stock; });
-
         const unixNow = Math.floor(Date.now() / 1000);
-        const ITEMS_PER_PRODUCT = 5;
 
         // Build embed
         const hasMaint = products.some(p => config.maintenance?.[p.id]);
         const embed = new EmbedBuilder()
-            .setTitle('🛡️ DATABASE MONITOR | PIXEL WORLD PRODUCTS')
-            .setColor(hasMaint ? '#e67e22' : '#C29C1D')
+            .setTitle('🌱 DATABASE MONITOR | GROW A GARDEN 2 PRODUCTS')
+            .setColor(hasMaint ? '#e67e22' : '#27ae60')
             .setTimestamp();
 
         if (config.embed?.thumbnail) { try { embed.setThumbnail(config.embed.thumbnail); } catch { /* skip */ } }
 
-        let description = '> Centralized stock monitoring for all Pixel World products.\n\n';
-        description += `⏱️ **Last Update:** <t:${unixNow}:R>\n`;
+        const eLS = (key) => getEmoji('liveStock', key);
+        const lastUpEmoji = eLS('lastUpdate') || '⏱️';
+        const prodEmoji = eLS('product') || '📦';
+        const stockEmoji = eLS('stock') || '📦';
+
+        let description = '> Centralized stock monitoring for all Grow A Garden 2 products.\n\n';
+        description += `${lastUpEmoji} **Last Update:** <t:${unixNow}:R>\n`;
 
         if (products.length === 0) {
             description += '\n*No products found. Add a product via Settings.*';
         } else {
             for (const p of products) {
                 const isMaint = config.maintenance?.[p.id] || false;
-                const stock = stockMap[p.id] || [];
+                const currentStock = parseInt(p.stock) || 0;
                 const statusEmoji = isMaint ? '🟠' : '🟢';
                 const statusText = isMaint ? 'MAINTENANCE' : 'ACTIVE';
 
+                const minBuy = Math.max(1, parseInt(p.min_buy) || 1);
+                const minBuyStr = minBuy > 1 ? ` | **Min. Buy:** \`${minBuy}\`` : '';
                 description += `\n━━━ \`${p.id}\` ━━━\n`;
-                description += `📦 **${p.name.toUpperCase()}**${isMaint ? ' `[MAINTENANCE]`' : ''}\n`;
-                description += `> **Stock:** \`${stock.length}\` | **Status:** ${statusEmoji} \`${statusText}\`\n`;
-
-                if (stock.length === 0) {
-                    description += `> *No stock items found.*\n`;
-                } else {
-                    const shown = stock.slice(0, ITEMS_PER_PRODUCT);
-                    shown.forEach((s, i) => {
-                        const content = safeStr(s?.content, '[empty]').replaceAll('|', ', ');
-                        const ts = safeUnix(s?.created_at);
-                        description += `> **${i + 1}.** \`${content}\` • <t:${ts}:R>\n`;
-                    });
-                    if (stock.length > ITEMS_PER_PRODUCT) {
-                        description += `> *... and ${stock.length - ITEMS_PER_PRODUCT} more*\n`;
-                    }
-                }
+                description += `${prodEmoji} **${p.name.toUpperCase()}**${isMaint ? ' `[MAINTENANCE]`' : ''}\n`;
+                description += `> ${stockEmoji} **Total Stock:** \`${currentStock}\`${minBuyStr} | **Status:** ${statusEmoji} \`${statusText}\`\n`;
             }
         }
 
@@ -676,7 +1043,7 @@ async function updateUnifiedMonitor() {
             const matches = msgs.filter(m => {
                 if (m.author.id !== client.user.id || !m.embeds?.length) return false;
                 const title = m.embeds[0].title || '';
-                return title.includes('DATABASE MONITOR') && title.includes('PIXEL WORLD PRODUCTS');
+                return title.includes('DATABASE MONITOR') && title.includes('GROW A GARDEN 2 PRODUCTS');
             });
 
             if (matches.size > 0) {
@@ -717,7 +1084,7 @@ async function migrateToUnifiedMonitor() {
     }
 
     console.log('[MIGRATION] Migrating to unified monitor...');
-    const dbChannelId = process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
+    const dbChannelId = process.env.PRODUCT_CHANNEL_ID || process.env.PRODUCT_PW_CHANNEL_ID || config.dashboardChannelId;
     if (!dbChannelId) return;
 
     const channel = await client.channels.fetch(dbChannelId).catch(() => null);
@@ -751,7 +1118,7 @@ async function migrateToUnifiedMonitor() {
         for (const [id, msg] of msgs) {
             if (msg.author.id !== client.user.id || !msg.embeds?.length) continue;
             const title = msg.embeds[0].title || '';
-            if (title.includes('DATABASE MONITOR') && !title.includes('PIXEL WORLD PRODUCTS')) {
+            if (title.includes('DATABASE MONITOR') && !title.includes('GROW A GARDEN 2 PRODUCTS')) {
                 await msg.delete().catch(() => { });
                 console.log(`[MIGRATION] Deleted legacy monitor embed: ${id}`);
             }
@@ -763,7 +1130,7 @@ async function migrateToUnifiedMonitor() {
     for (const key of Object.keys(config)) {
         if (key.startsWith('monitor_')) delete config[key];
     }
-    config.migrationCompleted = 'unified_v3.8';
+    config.migrationCompleted = 'unified_v5.0';
     saveConfig(config);
     console.log('[MIGRATION] Migration complete — flagged as done.');
 }
@@ -774,29 +1141,10 @@ async function migrateToUnifiedMonitor() {
 
 async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    const commands = [
-        {
-            name: 'removeblacklistbid',
-            description: 'Remove a bidder from the blacklist and allow them to participate in auctions again.',
-            options: [
-                {
-                    name: 'user',
-                    type: 6, // USER type
-                    description: 'The user to remove from the blacklist.',
-                    required: true
-                },
-                {
-                    name: 'reason',
-                    type: 3, // STRING type
-                    description: 'Reason for removing this user from the blacklist.',
-                    required: false
-                }
-            ]
-        }
-    ];
+    const commands = [];
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('[CMD] Slash commands registered successfully.');
+        console.log('[CMD] Slash commands registered (none active).');
     } catch (e) {
         console.error('[CMD] Failed to register slash commands:', e);
     }
@@ -823,7 +1171,7 @@ async function updateDashboard() {
         _lastDashboardHash = hash;
         _lastDashboardEditAt = Date.now();
 
-        const channel = await client.channels.fetch(process.env.PW_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
+        const channel = await client.channels.fetch(process.env.STOCK_CHANNEL_ID || process.env.PW_STOCK_CHANNEL_ID || config.channelId).catch(() => null);
         if (!channel) return;
 
         // Dynamic emoji from config with fallback
@@ -840,9 +1188,11 @@ async function updateDashboard() {
         const fields = [{ name: `${eLS('lastUpdate')} Last Update`, value: `<t:${unixTime}:R>`, inline: false }];
         products.forEach(p => {
             const isMaint = config.maintenance?.[p.id] || false;
+            const minBuy = Math.max(1, parseInt(p.min_buy) || 1);
+            const minBuyStr = minBuy > 1 ? `\n🛒 **Min. Buy:** \`${minBuy} Pcs\`` : '';
             fields.push({
                 name: `${eLS('product')} ${p.name.toUpperCase()}${isMaint ? ' [MAINTENANCE]' : ''}`,
-                value: `>>> ${eLS('stock')} **Stock:** \`${p.stock}\`\n${eLS('price')} **Price:** \`${p.price}\`\n${eLS('format')} **Format:** \`${p.format}\`\n${eLS('info')} **Info:** ${p.description}\n${eLS('id')} **ID:** ||${p.id}||`,
+                value: `>>> ${eLS('stock')} **Stock:** \`${p.stock}\`\n${eLS('price')} **Price:** \`${p.price}\`${minBuyStr}`,
                 inline: false
             });
         });
@@ -896,583 +1246,6 @@ async function updateDashboard() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// updateAuctionDashboard
-// ─────────────────────────────────────────────────────────────
-
-async function updateAuctionDashboard() {
-    await withLock('auction', async () => {
-        const config = loadConfig();
-        const auctionChannelId = process.env.AUCTION_CHANNEL_ID;
-        if (!auctionChannelId) { console.warn('[AUCTION] AUCTION_CHANNEL_ID not set.'); return; }
-
-        const channel = await client.channels.fetch(auctionChannelId).catch(() => null);
-        if (!channel) return;
-
-        const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
-
-        // Update state cache for zero-latency interactions
-        AUCTION_CACHE.active = !!auction;
-        AUCTION_CACHE.name = auction ? auction.name : '';
-
-        // Dynamic emoji from config with fallback
-        const eAU = (key) => getEmoji('auction', key);
-
-        const embed = new EmbedBuilder()
-            .setTitle(`${eAU('title')}  AUCTION SYSTEM DASHBOARD`)
-            .setColor('#2b2d31')
-            .setTimestamp();
-
-        if (!auction) {
-            embed.setDescription(`${eAU('statusInactive')} **NO ACTIVE AUCTION**\nThere are no active auction sessions at the moment. Please wait for an administrator to initialize a new session.`)
-                .addFields({ name: 'Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
-        } else {
-            const unixEnd = Math.floor(new Date(auction.end_time).getTime() / 1000);
-
-            // Fetch bid history for Top 11
-            const { data: bids } = await supabase.from('auction_bids')
-                .select('user_id, amount, created_at')
-                .eq('auction_id', auction.id)
-                .order('amount', { ascending: false })
-                .limit(11);
-
-            let standingText = `${eAU('highest')} **Highest Bid:** ${formatPrice(auction.current_bid)}\n${eAU('bidder')} **Bidder:** ${auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : '*None*'}\n${eAU('remaining')} **Remaining:** <t:${unixEnd}:R>`;
-
-            let historyText = '*No previous bids recorded.*';
-            if (bids && bids.length > 1) {
-                historyText = bids.slice(1).map((b, i) => `**#${i + 2}** <@${b.user_id}> — **${formatPrice(b.amount)}**`).join('\n');
-            }
-
-            embed.setDescription(`${eAU('statusActive')} **AUCTION ACTIVE**\nA new auction session is currently live. Place your bid before the timer expires!`)
-                .setFields(
-                    { name: `${eAU('product')} Product Information`, value: `**Name:** \`${auction.name}\`\n**Category:** \`${auction.category_name || 'Digital'}\`\n**Product ID:** \`${auction.product_id || '-'}\``, inline: false },
-                    { name: `${eAU('description')} Description`, value: `${auction.description || 'No description provided.'}`, inline: false },
-                    { name: `${eAU('standing')} Current Standing`, value: standingText, inline: true },
-                    { name: `${eAU('endTime')} End Time`, value: `<t:${unixEnd}:F>`, inline: true },
-                    { name: `${eAU('history')} Bid History (Top 10)`, value: historyText, inline: false },
-                    { name: `${eAU('rules')} Auction Rules`, value: `• Min. Increment: **${formatPrice(auction.bid_increment)}**\n• Anti-Fake Bid: Troll bids will result in an automatic **PERMANENT BAN**.\n• Settlement: Winner must finalize payment within **1 hour**.`, inline: false },
-                    { name: `${eAU('lastUpdate')} Last Update`, value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
-                );
-
-            if (auction.banner_url && (auction.banner_url.startsWith('http://') || auction.banner_url.startsWith('https://'))) {
-                try { embed.setImage(auction.banner_url); } catch { /* ignore invalid url */ }
-            }
-        }
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('btn_auction_register').setLabel('Register').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('btn_open_bid').setLabel('Open Bid').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('btn_auction_settings').setLabel('Settings').setStyle(ButtonStyle.Secondary)
-        );
-
-        const msg = await getOrCreateDashboardMessage(channel, 'auctionMessageId', ['AUCTION SYSTEM DASHBOARD']);
-        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[AUCTION] Edit failed:', e.message));
-        else {
-            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[AUCTION] Send failed:', e.message));
-            if (nMsg) {
-                config.auctionMessageId = nMsg.id;
-                saveConfig(config);
-            }
-        }
-    });
-}
-
-// ─────────────────────────────────────────────────────────────
-// checkAuctionDeadlines & Real-Time Auto-End
-// ─────────────────────────────────────────────────────────────
-
-const _endingAuctions = new Set();
-const _finalizingAuctions = new Set();
-const _notifiedNearing = new Set();
-
-// ─────────────────────────────────────────────────────────────
-// BLACKLIST BAN LOG HELPER
-// Sends a structured, professional log to AUCTION_EXPIRED_BAN_LOG_ID
-// ─────────────────────────────────────────────────────────────
-
-async function sendBlacklistBanLog({ userId, userTag, auctionProduct, auctionId, finalBid, reason, status }) {
-    try {
-        const banLogChanId = process.env.AUCTION_EXPIRED_BAN_LOG_ID;
-        if (!banLogChanId) return;
-        const banLogChan = await client.channels.fetch(banLogChanId).catch(() => null);
-        if (!banLogChan) return;
-
-        const unixNow = Math.floor(Date.now() / 1000);
-        const embed = new EmbedBuilder()
-            .setTitle('AUCTION BLACKLIST — Ban Record')
-            .setColor('#c0392b')
-            .setDescription('A user has been automatically blacklisted from the auction system due to a violation.')
-            .addFields(
-                { name: 'User', value: `<@${userId}>`, inline: true },
-                { name: 'User ID', value: `\`${userId}\``, inline: true },
-                { name: '\u200b', value: '\u200b', inline: true },
-                { name: 'Auction Product', value: `\`${auctionProduct || '—'}\``, inline: true },
-                { name: 'Auction ID', value: `\`${auctionId || '—'}\``, inline: true },
-                { name: 'Final Bid', value: finalBid ? `\`${formatPrice(finalBid)}\`` : '`—`', inline: true },
-                { name: 'Reason', value: `\`${reason}\``, inline: false },
-                { name: 'Time', value: `<t:${unixNow}:F>`, inline: true },
-                { name: 'Status Blacklist', value: '`ACTIVE — PERMANENTLY BANNED`', inline: true }
-            )
-            .setTimestamp();
-
-        await banLogChan.send({ embeds: [embed] }).catch(() => {});
-    } catch (e) {
-        console.warn('[BLACKLIST-LOG] Failed to send ban log:', e.message);
-    }
-}
-
-async function sendRestrictedWarningEmbed(auction, reason) {
-    try {
-        const logChanId = process.env.RESTRICTED_LOG_CHANNEL_ID || '1503766353721430036';
-        const logChan = await client.channels.fetch(logChanId).catch(() => null);
-        if (logChan) {
-            const embed = new EmbedBuilder()
-                .setTitle('⚠️ SECURITY ALERT: Auction Finalize Prevented')
-                .setColor('#d63031')
-                .setDescription(`An attempt to finalize an auction failed database security validation. The auction has been marked as **NEEDS REVIEW**.`)
-                .addFields(
-                    { name: 'Auction Name', value: `\`${auction.name}\` (ID: \`${auction.id}\`)`, inline: false },
-                    { name: 'Product ID', value: `\`${auction.product_id}\``, inline: true },
-                    { name: 'Highest Bidder', value: auction.highest_bidder_id ? `<@${auction.highest_bidder_id}>` : 'None', inline: true },
-                    { name: 'Current Bid', value: `**${formatPrice(auction.current_bid)}**`, inline: true },
-                    { name: 'End Time', value: `<t:${Math.floor(new Date(auction.end_time).getTime() / 1000)}:F>`, inline: false },
-                    { name: 'Security Concern', value: `\`${reason}\``, inline: false }
-                )
-                .setTimestamp();
-            await logChan.send({ embeds: [embed] }).catch(() => {});
-        }
-    } catch (e) {
-        console.error('[SECURITY] Failed to send restricted warning embed:', e.message);
-    }
-}
-
-function startAuctionFastLoop() {
-    console.log('[LOOP] Starting real-time auction expiry monitor (3s interval)...');
-    setInterval(async () => {
-        try {
-            const { data: activeAuc } = await supabase.from('auctions').select('id, name, end_time').eq('status', 'active');
-            if (!activeAuc || activeAuc.length === 0) return;
-
-            const now = Date.now();
-            for (const a of activeAuc) {
-                const timeLeft = new Date(a.end_time).getTime() - now;
-                
-                // Auction nearing deadline log (once per active auction cycle)
-                if (timeLeft <= 60000 && timeLeft > 0) {
-                    if (!_notifiedNearing.has(a.id)) {
-                        _notifiedNearing.add(a.id);
-                        console.log(`[SECURITY] Auction nearing deadline: ${a.id} (${a.name}) - ${Math.round(timeLeft / 1000)}s remaining.`);
-                    }
-                } else if (timeLeft > 60000) {
-                    _notifiedNearing.delete(a.id);
-                }
-
-                if (timeLeft <= 0) {
-                    if (_endingAuctions.has(a.id)) continue;
-                    _endingAuctions.add(a.id);
-                    
-                    console.log(`[DEADLINE] Auction detected expired: ${a.id} (${a.name})`);
-                    console.log(`[DEADLINE] Auto ending auction...`);
-                    
-                    endAuction(a.id).finally(() => {
-                        _endingAuctions.delete(a.id);
-                    });
-                }
-            }
-        } catch (e) {
-            if (e.code !== 10062 && !e.message?.includes('Timeout') && !e.message?.includes('fetch failed')) {
-                console.error('[DEADLINE] Fast loop error:', e.message);
-            }
-        }
-    }, 3000);
-}
-
-async function checkAuctionDeadlines() {
-    try {
-        // 2. Cleanup expired pending payments (24h ban)
-        const { data: expired } = await supabase.from('pending_payments')
-            .select('*')
-            .filter('invoice_id', 'ilike', 'AUC%')
-            .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-
-        if (!expired || expired.length === 0) return;
-
-        for (const pay of expired) {
-            const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-            let isAdmin = false;
-            try {
-                const guild = client.guilds.cache.first();
-                if (guild) {
-                    const member = await guild.members.fetch(pay.user_id).catch(() => null);
-                    if (member && member.roles.cache.has(adminRoleId)) {
-                        isAdmin = true;
-                    }
-                }
-            } catch (err) {
-                console.error(`[SECURITY] Error checking admin status for user ${pay.user_id}:`, err.message);
-            }
-
-            if (isAdmin) {
-                console.log(`[SECURITY] Admin bypass detected: Skipping 24h auction non-payment ban for admin ${pay.user_id}.`);
-                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
-                continue;
-            }
-
-            console.log(`[DEADLINE] Banning user ${pay.user_id} for non-payment of auction ${pay.invoice_id}`);
-            // ... (rest of ban logic remains same)
-            try {
-                const guild = client.guilds.cache.first();
-                if (!guild) continue;
-                const member = await guild.members.fetch(pay.user_id).catch(() => null);
-                const reason = `Automatic Banned: Non-payment of auction winning (>24h). ID: ${pay.invoice_id}`;
-                if (member) await member.ban({ reason }).catch(() => { });
-                else await guild.bans.create(pay.user_id, { reason }).catch(() => { });
-
-                const banLogChan = await client.channels.fetch(process.env.AUCTION_EXPIRED_BAN_LOG_ID).catch(() => null);
-                if (banLogChan) {
-                    const embed = new EmbedBuilder().setTitle('⛔ Winner Banned (Non-payment)').setColor('#ff4757')
-                        .addFields(
-                            { name: 'User', value: `<@${pay.user_id}>`, inline: true },
-                            { name: 'Invoice', value: `\`${pay.invoice_id}\``, inline: true }
-                        ).setTimestamp();
-                    await banLogChan.send({ embeds: [embed] }).catch(() => { });
-                }
-                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
-            } catch (inner) { console.error('[DEADLINE] Ban Error:', inner.message); }
-        }
-    } catch (e) {
-        console.error('[DEADLINE] Worker Error:', e);
-    }
-}
-
-async function endAuction(aid, isManual = false) {
-    if (_finalizingAuctions.has(aid)) {
-        console.log(`[SECURITY] Duplicate finalize blocked (Local lock active) for auction: ${aid}`);
-        return;
-    }
-    _finalizingAuctions.add(aid);
-
-    try {
-        // Atomic status transition in Supabase PostgreSQL
-        const { data: updatedRows, error: updateErr } = await supabase.from('auctions')
-            .update({ status: 'ended' })
-            .eq('id', aid)
-            .eq('status', 'active')
-            .select('*');
-
-        if (updateErr) {
-            console.error(`[SECURITY] Failed to transition status for auction ${aid}:`, updateErr.message);
-            return;
-        }
-        if (!updatedRows || updatedRows.length === 0) {
-            console.log(`[SECURITY] Duplicate finalize blocked: Auction ${aid} is already ended or not active.`);
-            return;
-        }
-
-        const auction = updatedRows[0];
-        console.log(`[DEADLINE] Auction nearing deadline / auto-end process triggered: ${aid} (${auction.name})`);
-
-        // Security check: Verify end time validity (with 5s grace period) for non-manual ends
-        const now = Date.now();
-        const endTime = new Date(auction.end_time).getTime();
-        if (!isManual && endTime > now + 5000) {
-            const reason = 'Auto-end triggered before auction duration completed.';
-            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
-            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
-            await sendRestrictedWarningEmbed(auction, reason);
-            return;
-        }
-
-        // Security check: Fetch and cross-validate highest bid from auction_bids history
-        const { data: bids, error: bidsErr } = await supabase.from('auction_bids')
-            .select('*')
-            .eq('auction_id', aid)
-            .order('amount', { ascending: false });
-
-        if (bidsErr) {
-            console.error(`[SECURITY] Failed to fetch bids for auction ${aid}:`, bidsErr.message);
-            // Revert status to active so it can be retried/inspected
-            await supabase.from('auctions').update({ status: 'active' }).eq('id', aid);
-            return;
-        }
-
-        const highestBid = bids && bids.length > 0 ? bids[0] : null;
-
-        // Verify bid presence consistency
-        if (!highestBid) {
-            if (auction.highest_bidder_id || auction.current_bid > auction.base_price) {
-                const reason = 'Database anomaly: No bids found, but highest bidder ID or amount is non-default.';
-                console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
-                await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
-                await sendRestrictedWarningEmbed(auction, reason);
-                return;
-            }
-
-            // Genuinely no bids placed
-            console.log(`[SECURITY] Auction finalized: ${aid} concluded with no bids.`);
-            const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
-            if (winChan) {
-                const noBidEmbed = new EmbedBuilder()
-                    .setTitle('⚖️  AUCTION CONCLUDED')
-                    .setColor('#7f8c8d')
-                    .setDescription(`The auction for **${auction.name}** has officially closed.\n\n🛑 **Result:** No bids were placed.`)
-                    .setTimestamp();
-                await winChan.send({ embeds: [noBidEmbed] }).catch(() => { });
-            }
-            updateAuctionDashboard();
-            return;
-        }
-
-        // Verify highest bid data matches auction summary
-        if (highestBid.user_id !== auction.highest_bidder_id || highestBid.amount !== auction.current_bid) {
-            const reason = `Database mismatch: Highest bid in auction_bids history (Amount: ${highestBid.amount}, User: ${highestBid.user_id}) does not match auction record (Amount: ${auction.current_bid}, User: ${auction.highest_bidder_id}).`;
-            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
-            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
-            await sendRestrictedWarningEmbed(auction, reason);
-            return;
-        }
-
-        // Verify winner eligibility (cannot be banned)
-        if (banCache.has(highestBid.user_id)) {
-            const reason = `Highest bidder <@${highestBid.user_id}> is currently banned/blacklisted.`;
-            console.warn(`[SECURITY] Invalid finalize prevented: ${reason} Auction: ${aid}`);
-            await supabase.from('auctions').update({ status: 'needs_review' }).eq('id', aid);
-            await sendRestrictedWarningEmbed(auction, reason);
-            return;
-        }
-
-        // Winner and bid validated successfully!
-        const winnerId = auction.highest_bidder_id;
-        const finalAmount = auction.current_bid;
-        console.log(`[SECURITY] Winner selected: User ${winnerId} won auction ${aid} with verified bid of ${finalAmount}`);
-        const orderId = `AUC${Date.now()}`;
-
-        // Public Winner Notification
-        const winChan = await client.channels.fetch(process.env.AUCTION_WIN_CHANNEL_ID).catch(() => null);
-        if (winChan) {
-            const winEmbed = new EmbedBuilder()
-                .setTitle('🏆  AUCTION CONCLUDED')
-                .setColor('#f1c40f')
-                .setDescription(`The auction for **${auction.name}** has officially closed.\n\n👑 **Winner:** <@${winnerId}>\n💰 **Final Bid:** **${formatPrice(finalAmount)}**\n\n*The winner has 1 hour to finalize the transaction or face a permanent ban.*`)
-                .setTimestamp();
-            await winChan.send({ content: `<@${winnerId}>`, embeds: [winEmbed] }).catch(() => { });
-        }
-
-        // Create Pakasir transaction
-        try {
-            const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
-                project: process.env.PAKASIR_SLUG,
-                order_id: orderId,
-                amount: finalAmount,
-                api_key: process.env.PAKASIR_API_KEY
-            }, { timeout: 15000 }).catch(() => null);
-
-            if (res?.data?.payment) {
-                await supabase.from('pending_payments').insert([{
-                    invoice_id: orderId,
-                    user_id: winnerId,
-                    product_id: auction.product_id, // For stock delivery lookup
-                    qty: 1,
-                    amount: finalAmount,
-                    created_at: new Date().toISOString()
-                }]);
-
-                const winner = await client.users.fetch(winnerId).catch(() => null);
-                if (winner) {
-                    const embed = new EmbedBuilder()
-                        .setTitle('🏆  AUCTION VICTORY!')
-                        .setColor('#f1c40f')
-                        .setDescription(`Congratulations! You have secured the highest bid for **${auction.name}**.\n\nPlease scan the QRIS below **within 1 hour** to finalize your acquisition. Failure to pay will result in an automatic **PERMANENT BAN**.`)
-                        .addFields(
-                            { name: '📦 Item', value: `\`${auction.name}\``, inline: true },
-                            { name: '💰 Final Bid', value: `**${formatPrice(finalAmount)}**`, inline: true },
-                            { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
-                        )
-                        .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
-                        .setTimestamp();
-
-                    const btn = new ActionRowBuilder().addComponents(
-                        new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
-                    );
-                    await winner.send({ embeds: [embed], components: [btn] }).catch(() => { });
-                }
-            }
-        } catch (e) {
-            console.error('[AUCTION] Payment creation failed:', e.message);
-        }
-
-        console.log(`[SECURITY] Auction finalized: ${aid} has concluded.`);
-    } finally {
-        _finalizingAuctions.delete(aid);
-    }
-}
-
-async function checkAuctionSettlements() {
-    try {
-        const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
-        const { data: expired } = await supabase.from('pending_payments')
-            .select('*')
-            .filter('invoice_id', 'like', 'AUC_%')
-            .lt('created_at', oneHourAgo);
-
-        if (!expired || expired.length === 0) return;
-
-        for (const pay of expired) {
-            // Lookup auction by product_id (works for both old AUC_X_Y and new AUC{ts} format)
-            const { data: auctionMatch } = await supabase.from('auctions')
-                .select('id')
-                .eq('product_id', pay.product_id)
-                .in('status', ['ended'])
-                .order('created_at', { ascending: false })
-                .limit(1)
-                .single();
-
-            const aid = auctionMatch?.id;
-            if (!aid) {
-                console.warn(`[SETTLEMENT] No auction found for product_id ${pay.product_id}, skipping.`);
-                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
-                continue;
-            }
-            const userId = pay.user_id;
-            const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-            let isAdmin = false;
-            try {
-                const guild = client.guilds.cache.first();
-                if (guild) {
-                    const member = await guild.members.fetch(userId).catch(() => null);
-                    if (member && member.roles.cache.has(adminRoleId)) {
-                        isAdmin = true;
-                    }
-                }
-            } catch (err) {
-                console.error(`[SECURITY] Error checking admin status for user ${userId}:`, err.message);
-            }
-
-            if (isAdmin) {
-                console.log(`[SECURITY] Admin bypass detected: Skipping 1h auction failure ban and reroll for admin ${userId}.`);
-                await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
-                continue;
-            }
-
-            console.log(`[SETTLEMENT] Auction ${aid} winner ${userId} failed to pay. Processing ban and reroll...`);
-
-            // Fetch auction details for ban log
-            const { data: aucDetail } = await supabase.from('auctions').select('name, product_id, current_bid').eq('id', aid).maybeSingle();
-
-            // 1. Permanent Ban
-            const banReason = 'Auction Payment Default — Winner failed to complete payment within 1 hour.';
-            await supabase.from('banned_users').upsert([{ id: userId, reason: banReason, created_at: new Date().toISOString() }]);
-            banCache.set(userId, banReason); // Sync cache instantly
-
-            // Send structured ban log to AUCTION_EXPIRED_BAN_LOG_ID
-            sendBlacklistBanLog({
-                userId,
-                userTag: pay.user_id,
-                auctionProduct: aucDetail?.name || pay.product_id || '—',
-                auctionId: aid,
-                finalBid: pay.amount || aucDetail?.current_bid || 0,
-                reason: banReason,
-                status: 'ACTIVE — PERMANENTLY BANNED'
-            }).catch(() => {});
-
-            // 2. Remove fake bids
-            await supabase.from('auction_bids').delete().eq('auction_id', aid).eq('user_id', userId);
-
-            // 3. Find 2nd highest bidder (if any)
-            const { data: nextBid } = await supabase.from('auction_bids')
-                .select('*')
-                .eq('auction_id', aid)
-                .order('amount', { ascending: false })
-                .limit(1)
-                .single();
-
-            // 4. Re-open Auction
-            if (nextBid) {
-                await supabase.from('auctions').update({
-                    status: 'active',
-                    current_bid: nextBid.amount,
-                    highest_bidder_id: nextBid.user_id,
-                    end_time: new Date(Date.now() + 3600000).toISOString() // Restart with 1 hour remaining
-                }).eq('id', aid);
-                console.log(`[SECURITY] Auction started: Re-opened ${aid} after winner default.`);
-
-                const channel = await client.channels.fetch(process.env.AUCTION_CHANNEL_ID).catch(() => null);
-                if (channel) {
-                    const embed = new EmbedBuilder()
-                        .setTitle('⚠️  AUCTION RE-OPENED')
-                        .setColor('#e74c3c')
-                        .setDescription(`The previous winner failed to fulfill their bid for **${pay.product_id}**.\n\n👑 **Auction Resumed:** **${formatPrice(nextBid.amount)}** by <@${nextBid.user_id}>\n⏳ **New Deadline:** <t:${Math.floor((Date.now() + 3600000) / 1000)}:R>\n\n*The troll bidder has been permanently banned.*`)
-                        .setTimestamp();
-                    await channel.send({ content: '@everyone', embeds: [embed] }).catch(() => { });
-                }
-            } else {
-                // No valid bids left, keep active but reset
-                await supabase.from('auctions').update({
-                    status: 'active',
-                    current_bid: 0,
-                    highest_bidder_id: null,
-                    end_time: new Date(Date.now() + 3600000).toISOString()
-                }).eq('id', aid);
-                console.log(`[SECURITY] Auction started: Reset active ${aid} with 0 bids after winner default.`);
-            }
-
-            // 5. Cleanup
-            await supabase.from('pending_payments').delete().eq('invoice_id', pay.invoice_id);
-        }
-        await updateAuctionDashboard();
-    } catch (e) {
-        console.error('[SETTLEMENT] Loop error:', e.message);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-// updateStockDashboard
-// ─────────────────────────────────────────────────────────────
-
-async function updateStockDashboard() {
-    await withLock('stock', async () => {
-        const config = loadConfig();
-        const stockChannelId = process.env.PRODUCT_BID_CHANNEL_ID;
-        if (!stockChannelId) { console.warn('[STOCK] PRODUCT_BID_CHANNEL_ID not set.'); return; }
-
-        const channel = await client.channels.fetch(stockChannelId).catch(() => null);
-        if (!channel) return;
-
-        const allProducts = await getCachedProducts();
-        const products = (allProducts || []).filter(p => isAuctionProduct(p));
-
-        const embed = new EmbedBuilder()
-            .setTitle('📦  STOCK MANAGEMENT SYSTEM')
-            .setColor('#3498db')
-            .setDescription('>>> Centralized management for categories and digital stock levels.')
-            .setTimestamp();
-
-        if (!products || products.length === 0) {
-            embed.addFields({ name: 'Categories', value: '*None found. Add a category first.*' });
-        } else {
-            const list = products.map(p => `• **${p.name}**\n   ID: \`${p.id}\` | Stock: \`${p.stock}\``).join('\n\n');
-            embed.setDescription(`>>> **Manage your product categories and stock levels below.**\n\n${list.slice(0, 3500)}`);
-        }
-        embed.addFields({ name: '⏱️ Last Update', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: false });
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('btn_stock_mgmt_add').setLabel('Add Stock').setStyle(ButtonStyle.Success).setEmoji('➕'),
-            new ButtonBuilder().setCustomId('btn_stock_mgmt_edit').setLabel('Edit Stock').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
-            new ButtonBuilder().setCustomId('btn_stock_mgmt_del').setLabel('Delete Stock').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
-        );
-
-        const msg = await getOrCreateDashboardMessage(channel, 'stockMessageId', ['STOCK MANAGEMENT SYSTEM']);
-        if (msg) await withRetry(() => msg.edit({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[STOCK] Edit failed:', e.message));
-        else {
-            const nMsg = await withRetry(() => channel.send({ embeds: [embed], components: [row] }), 3, 3000).catch(e => console.error('[STOCK] Send failed:', e.message));
-            if (nMsg) {
-                config.stockMessageId = nMsg.id;
-                saveConfig(config);
-            }
-        }
-    });
-}
-
-// ─────────────────────────────────────────────────────────────
 // updateVersionDashboard
 // ─────────────────────────────────────────────────────────────
 
@@ -1492,7 +1265,7 @@ async function updateVersionDashboard() {
         const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`;
 
         const embed = new EmbedBuilder()
-            .setTitle('QUANTUMBLOX STORE — Version Dashboard')
+            .setTitle('GROW A GARDEN 2 — Version Dashboard')
             .setColor('#2b2d31')
             .setDescription(`**v${BOT_VERSION.version}** — ${BOT_VERSION.codename}\nReleased: ${BOT_VERSION.date}`)
             .addFields(
@@ -1632,7 +1405,7 @@ async function updateCountingTrack() {
         const unixNow = Math.floor(Date.now() / 1000);
 
         const embed = new EmbedBuilder()
-            .setTitle('QUANTUMBLOX STORE \u2014 Server Statistics')
+            .setTitle('GROW A GARDEN 2 — Server Statistics')
             .setColor('#2b2d31')
             .setDescription(
                 `Realtime server and sales tracking.\n\n` +
@@ -1714,7 +1487,7 @@ async function updateSoldDataDashboard() {
         const unixNow = Math.floor(Date.now() / 1000);
 
         const embed = new EmbedBuilder()
-            .setTitle('QUANTUMBLOX STORE \u2014 Sold Data Archive')
+            .setTitle('GROW A GARDEN 2 — Sold Data Archive')
             .setColor('#2b2d31')
             .setDescription(
                 `Search and lookup all sold product data.\n` +
@@ -2013,8 +1786,8 @@ client.on('interactionCreate', async interaction => {
     try {
         // ── 1. INSTANT ACKNOWLEDGEMENT (Priority #1) ──
         // Determine if we should defer (Buttons/Menus) or skip (Modals)
-        const modalIDPrefixes = ['btn_open_bid', 'btn_db_add_', 'btn_search_sold', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_stock_add_pick', 'sel_auction_edit_pick', 'sel_auction_edit_active_pick', 'sel_emoji_ls_pick', 'sel_emoji_auc_pick', 'sel_unified_add_pick'];
-        const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config', 'opt_add_auction', 'opt_add_category'];
+        const modalIDPrefixes = ['btn_ord_proc_', 'btn_ord_done_', 'btn_ord_cancel_', 'btn_db_add_', 'btn_db_edit_pick_', 'btn_db_del_pick_', 'btn_search_sold', 'sel_db_edit_', 'sel_p_edit_pick', 'sel_buy', 'sel_emoji_ls_pick', 'sel_unified_add_pick', 'sel_unified_edit_pick', 'sel_unified_del_pick'];
+        const selectModalOptions = ['opt_add_p', 'opt_manual_pay', 'opt_config'];
 
         const isModalTrigger = modalIDPrefixes.some(pre => interaction.customId?.startsWith(pre)) ||
             (interaction.isStringSelectMenu() && selectModalOptions.includes(interaction.values[0]));
@@ -2029,116 +1802,11 @@ client.on('interactionCreate', async interaction => {
         console.log(`[INTERACTION] ${interaction.user.tag} -> ${interaction.customId || 'N/A'}`);
 
         // Check admin role to enforce bypass
-        const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-        const isAdmin = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
-
-        if (isAdmin) {
-            if (banCache.has(interaction.user.id)) {
-                console.log(`[SECURITY] Admin bypass detected: Unbanning admin ${interaction.user.tag} (${interaction.user.id})`);
-                banCache.delete(interaction.user.id);
-                supabase.from('banned_users').delete().eq('id', interaction.user.id)
-                    .then(({ error }) => {
-                        if (error) console.error(`[SECURITY] Failed to remove admin ${interaction.user.id} from database banned_users:`, error.message);
-                        else console.log(`[SECURITY] Admin ${interaction.user.id} removed from database banned_users.`);
-                    }).catch(e => console.error(`[SECURITY] Error removing admin ${interaction.user.id} from database:`, e.message));
-            }
-        } else {
-            // Ultra-fast ban check from memory cache (0ms vs ~200ms Supabase query)
-            if (banCache.has(interaction.user.id)) {
-                const reason = banCache.get(interaction.user.id);
-                return safeReply(interaction, { content: `❌ **ACCESS DENIED:** You have been permanently banned.\nReason: \`${reason}\``, flags: [MessageFlags.Ephemeral] });
-            }
-        }
 
         // ── SLASH COMMANDS ────────────────────────────────────
+        // No slash commands active in v5.0.0 (Auction system removed)
         if (interaction.isChatInputCommand()) {
-            // ── /removeblacklistbid ───────────────────────────
-            if (interaction.commandName === 'removeblacklistbid') {
-                await safeDefer(interaction, true);
-
-                // Permission check: Admin role only
-                const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-                const isAdminCmd = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
-                if (!isAdminCmd) {
-                    return safeReply(interaction, {
-                        content: '❌ **Access Denied.** Only administrators with the required role can use this command.',
-                        flags: [MessageFlags.Ephemeral]
-                    });
-                }
-
-                const targetUser = interaction.options.getUser('user');
-                const removeReason = interaction.options.getString('reason') || 'No reason provided.';
-
-                if (!targetUser) {
-                    return safeReply(interaction, { content: '❌ Please specify a valid user.', flags: [MessageFlags.Ephemeral] });
-                }
-
-                // Check if user is actually blacklisted
-                const { data: banRecord } = await supabase
-                    .from('banned_users')
-                    .select('*')
-                    .eq('id', targetUser.id)
-                    .maybeSingle();
-
-                const isCachedBanned = banCache.has(targetUser.id);
-
-                if (!banRecord && !isCachedBanned) {
-                    return safeReply(interaction, {
-                        content: `⚠️ User <@${targetUser.id}> (\`${targetUser.id}\`) is not currently blacklisted in the auction system.`,
-                        flags: [MessageFlags.Ephemeral]
-                    });
-                }
-
-                // Remove from database
-                const { error: delErr } = await supabase.from('banned_users').delete().eq('id', targetUser.id);
-                if (delErr) {
-                    return safeReply(interaction, {
-                        content: `❌ Failed to remove blacklist from database: \`${delErr.message}\``,
-                        flags: [MessageFlags.Ephemeral]
-                    });
-                }
-
-                // Remove from memory cache
-                banCache.delete(targetUser.id);
-
-                console.log(`[BLACKLIST] Removed blacklist for user ${targetUser.tag} (${targetUser.id}) by Admin ${interaction.user.tag} (${interaction.user.id}). Reason: ${removeReason}`);
-
-                // Send admin action log to AUCTION_EXPIRED_BAN_LOG_ID
-                const banLogChanId = process.env.AUCTION_EXPIRED_BAN_LOG_ID;
-                if (banLogChanId) {
-                    const banLogChan = await client.channels.fetch(banLogChanId).catch(() => null);
-                    if (banLogChan) {
-                        const unixNow = Math.floor(Date.now() / 1000);
-                        const previousReason = banRecord?.reason || isCachedBanned ? banCache.get(targetUser.id) : '—';
-                        const logEmbed = new EmbedBuilder()
-                            .setTitle('AUCTION BLACKLIST — Blacklist Removed')
-                            .setColor('#27ae60')
-                            .setDescription('An administrator has manually removed a user from the auction blacklist.')
-                            .addFields(
-                                { name: 'Target User', value: `<@${targetUser.id}>`, inline: true },
-                                { name: 'User ID', value: `\`${targetUser.id}\``, inline: true },
-                                { name: '\u200b', value: '\u200b', inline: true },
-                                { name: 'Removed By', value: `<@${interaction.user.id}>`, inline: true },
-                                { name: 'Admin ID', value: `\`${interaction.user.id}\``, inline: true },
-                                { name: '\u200b', value: '\u200b', inline: true },
-                                { name: 'Previous Ban Reason', value: `\`${previousReason || '—'}\``, inline: false },
-                                { name: 'Removal Reason', value: `\`${removeReason}\``, inline: false },
-                                { name: 'Time', value: `<t:${unixNow}:F>`, inline: true },
-                                { name: 'Status Blacklist', value: '`REMOVED — ACCESS RESTORED`', inline: true }
-                            )
-                            .setTimestamp();
-                        await banLogChan.send({ embeds: [logEmbed] }).catch(() => {});
-                    }
-                }
-
-                return safeReply(interaction, {
-                    content: `✅ Blacklist for <@${targetUser.id}> has been successfully removed.\nThe user can now participate in auctions again.`,
-                    flags: [MessageFlags.Ephemeral]
-                });
-            }
-
-            // Unknown slash command fallback
-            return safeReply(interaction, { content: 'This command is not available. Please use buttons on the dashboard.', flags: [MessageFlags.Ephemeral] });
+            return safeReply(interaction, { content: 'No commands available. Please use dashboard buttons.', flags: [MessageFlags.Ephemeral] });
         }
 
         // ═════════════════════════════════════════════════════
@@ -2197,6 +1865,7 @@ client.on('interactionCreate', async interaction => {
                     .setCustomId('sel_admin_menu')
                     .setPlaceholder('Choose an administrative action...')
                     .addOptions([
+                        { label: 'Order Manager', description: 'Filter & kelola antrean order pembeli', value: 'opt_manage_orders', emoji: '📦' },
                         { label: 'Add Product', description: 'Create a new product listing', value: 'opt_add_p', emoji: '➕' },
                         { label: 'Edit Product', description: 'Update price or name of a product', value: 'opt_edit_p', emoji: '📝' },
                         { label: 'Maintenance Status', description: 'Enable/disable maintenance for products', value: 'opt_maintenance', emoji: '🛠️' },
@@ -2215,7 +1884,6 @@ client.on('interactionCreate', async interaction => {
 
             // ── btn_register ──────────────────────────────────
             if (interaction.customId === 'btn_register') {
-                // Already deferred at top
                 const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
                 if (user) return safeReply(interaction, { content: '⚠️ You are already registered!' });
 
@@ -2225,410 +1893,290 @@ client.on('interactionCreate', async interaction => {
                 return safeReply(interaction, { content: '✅ Successfully registered! You can now buy products.' });
             }
 
-            // ── btn_auction_register ──────────────────────────
-            if (interaction.customId === 'btn_auction_register') {
-                // Already deferred at top
-                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (user) return safeReply(interaction, { content: '⚠️ You are already registered!' });
-                const { error: insertErr } = await supabase.from('users').insert([{ id: interaction.user.id }]);
-                if (insertErr) return safeReply(interaction, { content: `❌ Registration failed: ${insertErr.message}` });
-                return safeReply(interaction, { content: '✅ Successfully registered for the auction system!' });
-            }
-
-            if (interaction.customId === 'btn_open_bid') {
-                // Zero-latency modal trigger
-                const auctionName = AUCTION_CACHE.name || 'Current Auction';
-                const modal = new ModalBuilder().setCustomId('mod_open_bid').setTitle(safeTitle('💰 Place Bid', auctionName));
-                modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder().setCustomId('amount').setLabel('Bid Amount (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)
-                ));
-                return safeModal(interaction, modal);
-            }
-
-            if (interaction.customId === 'btn_auction_settings') {
-                // Already deferred at top
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Only admins can access settings.' });
-
-                const menu = new StringSelectMenuBuilder()
-                    .setCustomId('sel_auction_admin')
-                    .setPlaceholder('Auction Management...')
-                    .addOptions([
-                        { label: 'Add Auction Product', description: 'Start auction using product from database', value: 'opt_add_auction', emoji: '➕' },
-                        { label: 'Edit Auction Product', description: 'Modify active or pending auction settings', value: 'opt_edit_active_auction', emoji: '📝' },
-                        { label: 'Add Product', description: 'Register new product to database', value: 'opt_add_category', emoji: '🏷️' },
-                        { label: 'Edit Product', description: 'Modify existing product in database', value: 'opt_edit_category', emoji: '✏️' },
-                        { label: 'Delete Product', description: 'Permanently remove product from database', value: 'opt_delete_category', emoji: '🗑️' },
-                        { label: 'Delete Auction Product', description: 'Remove an auction product from database', value: 'opt_delete_auction', emoji: '❌' },
-                        { label: 'Start/Stop Auction', description: 'Toggle auction status', value: 'opt_toggle_auction', emoji: '⚙️' },
-                        { label: 'Set Custom Emoji', description: 'Change auction dashboard emoji', value: 'opt_custom_emoji_auction', emoji: '🎨' }
-                    ]);
-
-                return safeReply(interaction, {
-                    content: '🛠️ **Auction Admin Menu**\nChoose an option below:',
-                    components: [new ActionRowBuilder().addComponents(menu)]
-                });
-            }
-
             // ── btn_unified_add ────────────────────────────────
             if (interaction.customId === 'btn_unified_add') {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                if (!isOrderAdmin(interaction))
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses.', flags: [MessageFlags.Ephemeral] });
 
                 const allProducts = await getCachedProducts();
                 const products = (allProducts || []).filter(p => !isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.', flags: [MessageFlags.Ephemeral] });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_add_pick').setPlaceholder('Select a product to add stock to...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return safeReply(interaction, { content: '📦 **Add Stock**\nSelect the target product:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '📦 **Add Stock**\nSelect the target product:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
             }
 
             // ── btn_unified_edit ───────────────────────────────
             if (interaction.customId === 'btn_unified_edit') {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                if (!isOrderAdmin(interaction))
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses.', flags: [MessageFlags.Ephemeral] });
 
                 const allProducts = await getCachedProducts();
                 const products = (allProducts || []).filter(p => !isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.', flags: [MessageFlags.Ephemeral] });
 
                 const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_edit_pick').setPlaceholder('Select a product to edit stock...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return safeReply(interaction, { content: '✏️ **Edit Stock**\nSelect the product whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '📝 **Edit Stock**\nSelect the target product:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
             }
 
             // ── btn_unified_del ────────────────────────────────
             if (interaction.customId === 'btn_unified_del') {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
+                if (!isOrderAdmin(interaction))
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses.', flags: [MessageFlags.Ephemeral] });
 
                 const allProducts = await getCachedProducts();
                 const products = (allProducts || []).filter(p => !isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.' });
+                if (products.length === 0) return safeReply(interaction, { content: '❌ No Live Stock products found.', flags: [MessageFlags.Ephemeral] });
 
-                const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_del_pick').setPlaceholder('Select a product to delete stock from...');
+                const menu = new StringSelectMenuBuilder().setCustomId('sel_unified_del_pick').setPlaceholder('Select a product to reduce stock...');
                 products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
 
-                return safeReply(interaction, { content: '🗑️ **Delete Stock**\nSelect the product whose stock you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
+                return safeReply(interaction, { content: '🗑️ **Delete / Reduce Stock**\nSelect the target product:', components: [new ActionRowBuilder().addComponents(menu)], flags: [MessageFlags.Ephemeral] });
             }
-
-            // ── btn_db_add_ (legacy backward compat) ──────────
-            // NOTE: showModal cannot be called after deferReply
-            if (interaction.customId.startsWith('btn_db_add_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
-
-                const pid = interaction.customId.replace('btn_db_add_', '');
-                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Add Stock', pid));
-                modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('data')
-                        .setLabel('Stock Data (one entry per line)')
-                        .setPlaceholder('UsernameSteam|PasswordSteam|EmailAcc|PasswordAcc')
-                        .setStyle(TextInputStyle.Paragraph)
-                        .setRequired(true)
-                ));
-                return await safeModal(interaction, modal);
-            }
-
-            // ── btn_db_edit_pick_ ─────────────────────────────
-            if (interaction.customId.startsWith('btn_db_edit_pick_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
-
-                const pid = interaction.customId.replace('btn_db_edit_pick_', '');
-                // Already deferred at top
-
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to edit.' });
-
-                const select = new StringSelectMenuBuilder()
-                    .setCustomId(`sel_db_edit_${pid}`)
-                    .setPlaceholder('Select an entry to edit...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-
-                return safeReply(interaction, { content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
-            }
-
-            // ── btn_db_del_pick_ ──────────────────────────────
-            if (interaction.customId.startsWith('btn_db_del_pick_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID))
-                    return safeReply(interaction, { content: '❌ Admins only.', flags: [MessageFlags.Ephemeral] });
-
-                const pid = interaction.customId.replace('btn_db_del_pick_', '');
-                // Already deferred at top
-
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete.' });
-
-                const select = new StringSelectMenuBuilder()
-                    .setCustomId(`sel_db_del_${pid}`)
-                    .setPlaceholder('Select an entry to delete...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-
-                return safeReply(interaction, { content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
-            }
-
-            // ── btn_stock_mgmt_add ───────────────────────────
-            if (interaction.customId === 'btn_stock_mgmt_add') {
-                // Already deferred at top
-                const { data: all } = await supabase.from('products').select('*').order('name');
-                const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found. Please add a category first.' });
-
-                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_add_pick').setPlaceholder('Select a category to add stock to...');
-                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
-
-                return safeReply(interaction, { content: '📦 **Add Stock**\nSelect the target category:', components: [new ActionRowBuilder().addComponents(menu)] });
-            }
-
-            // ── btn_stock_mgmt_edit ──────────────────────────
-            if (interaction.customId === 'btn_stock_mgmt_edit') {
-                // Already deferred at top
-                const { data: all } = await supabase.from('products').select('*').order('name');
-                const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found.' });
-
-                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_edit_pick').setPlaceholder('Select a category to edit its stock...');
-                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
-
-                return safeReply(interaction, { content: '✏️ **Edit Stock**\nSelect the category whose stock you want to edit:', components: [new ActionRowBuilder().addComponents(menu)] });
-            }
-
-            // ── btn_stock_mgmt_del ───────────────────────────
-            if (interaction.customId === 'btn_stock_mgmt_del') {
-                // Already deferred at top
-                const { data: all } = await supabase.from('products').select('*').order('name');
-                const products = (all || []).filter(p => isAuctionProduct(p));
-                if (products.length === 0) return safeReply(interaction, { content: '❌ No categories found.' });
-
-                const menu = new StringSelectMenuBuilder().setCustomId('sel_stock_del_pick').setPlaceholder('Select a category to delete its stock item...');
-                products.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Stock: ${p.stock}`, value: p.id }));
-
-                return safeReply(interaction, { content: '🗑️ **Delete Stock**\nSelect the category whose stock item you want to delete:', components: [new ActionRowBuilder().addComponents(menu)] });
-            }
-
-            // ── btn_confirm_del_auc_ ───────────────────────────
-            if (interaction.customId.startsWith('btn_confirm_del_auc_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
-                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
+            if (interaction.customId.startsWith('btn_ord_proc_')) {
+                if (!isOrderAdmin(interaction)) {
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses untuk memproses orderan.', flags: [MessageFlags.Ephemeral] });
                 }
-                const aid = interaction.customId.replace('btn_confirm_del_auc_', '');
+
+                const orderId = interaction.customId.replace('btn_ord_proc_', '');
                 await safeDeferUpdate(interaction);
 
-                const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
-                if (!auction) return safeReply(interaction, { content: '❌ Auction product not found or already deleted.', components: [] });
+                const { data: order } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
+                if (order?.status === 'Processing') {
+                    return interaction.followUp({ content: `⚠️ Order \`${orderId}\` sudah dalam status **Processing**.`, flags: [MessageFlags.Ephemeral] }).catch(() => null);
+                }
 
-                // Runtime Re-validation
-                if (auction.status !== 'pending') {
-                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to delete auction ${aid} which is now: ${auction.status}`);
-                    let warningMsg = `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently: **${auction.status.toUpperCase()}**.`;
-                    if (auction.status === 'active') {
-                        warningMsg = `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently **ACTIVE/LIVE** and cannot be deleted. Please stop or close the auction first.`;
+                const rUsername = order?.roblox_username || 'N/A';
+                const prodName = order?.product_name || 'Quantumblox Store Product';
+                const qty = order?.qty || 1;
+                const amount = order?.amount ? `Rp. ${new Intl.NumberFormat('id-ID').format(order.amount)}` : 'N/A';
+                const buyerId = order?.buyer_id;
+                const buyerTag = order?.buyer_tag || 'Unknown';
+
+                // Update Database Status
+                await supabase.from('orders').update({ status: 'Processing', processed_by: interaction.user.id, processed_at: new Date().toISOString() }).eq('order_id', orderId);
+
+                // Build Updated Embed (Same Message in Waiting-List)
+                const embed = new EmbedBuilder()
+                    .setTitle(`⚙️ ORDER PROCESSING \u2014 ${orderId}`)
+                    .setColor('#3498db')
+                    .addFields(
+                        { name: '👤 Username Roblox', value: `\`\`\`${rUsername}\`\`\``, inline: false },
+                        { name: '📦 Detail Produk', value: `**${prodName}**`, inline: true },
+                        { name: '🔢 Jumlah', value: `\`${qty} Pcs\``, inline: true },
+                        { name: '💰 Total Transaksi', value: `\`${amount}\``, inline: true },
+                        { name: '💰 Payment Status', value: `🟢 **Paid (Automatic)**`, inline: true },
+                        { name: '🚚 Delivery Status', value: `🔵 **Processing**`, inline: true },
+                        { name: '👤 Pembeli', value: buyerId ? `<@${buyerId}> (\`${buyerTag}\`)` : 'Unknown', inline: true },
+                        { name: '🆔 Order ID', value: `\`${orderId}\``, inline: true },
+                        { name: '⚙️ Diproses Oleh', value: `<@${interaction.user.id}> (<t:${Math.floor(Date.now() / 1000)}:R>)`, inline: false }
+                    )
+                    .setTimestamp();
+
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`btn_ord_proc_${orderId}`).setLabel('⚙️ Processing').setStyle(ButtonStyle.Primary).setDisabled(true),
+                    new ButtonBuilder().setCustomId(`btn_ord_done_${orderId}`).setLabel('✅ Done / Complete').setStyle(ButtonStyle.Success).setDisabled(false),
+                    new ButtonBuilder().setCustomId(`btn_ord_cancel_${orderId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Danger).setDisabled(false)
+                );
+
+                // Edit existing message in-place
+                await safeUpdate(interaction, { embeds: [embed], components: [row] });
+                await interaction.followUp({ content: `🔵 Order \`${orderId}\` diubah ke status **Processing**.`, flags: [MessageFlags.Ephemeral] }).catch(() => null);
+
+                if (buyerId) {
+                    const buyerUser = await client.users.fetch(buyerId).catch(() => null);
+                    if (buyerUser) {
+                        buyerUser.send({
+                            embeds: [new EmbedBuilder()
+                                .setTitle('🔵 Order Status Update')
+                                .setColor('#3498db')
+                                .setDescription(`Orderan Anda **${orderId}** (${prodName}) untuk Username Roblox **${rUsername}** sedang diproses oleh admin!`)
+                                .setTimestamp()]
+                        }).catch(() => null);
                     }
-                    return safeReply(interaction, { content: warningMsg, components: [] });
                 }
-
-                // Check bids presence
-                const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
-                if (bids && bids.length > 0) {
-                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to delete auction ${aid} which has bids in history.`);
-                    return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
-                }
-
-                const { error: delErr } = await supabase.from('auctions').delete().eq('id', aid);
-                if (delErr) {
-                    return safeReply(interaction, { content: `❌ Failed to delete auction: ${delErr.message}`, components: [] });
-                }
-
-                console.log(`[SECURITY] Deleted pending auction product: ${aid} (${auction.name}) | Deleted by Admin: ${interaction.user.tag} (${interaction.user.id}) | Timestamp: ${new Date().toISOString()}`);
-
-                await safeReply(interaction, { content: `✅ Auction product **${auction.name}** has been successfully deleted.`, components: [] });
-                updateAuctionDashboard();
                 return;
             }
 
-            // ── btn_cancel_del_auc_ ────────────────────────────
-            if (interaction.customId.startsWith('btn_cancel_del_auc_')) {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
-                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
+            // ── btn_ord_done_ ──────────────────────────────────
+            if (interaction.customId.startsWith('btn_ord_done_')) {
+                if (!isOrderAdmin(interaction)) {
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses untuk menyelesaikan pengiriman order.', flags: [MessageFlags.Ephemeral] });
                 }
+
+                const orderId = interaction.customId.replace('btn_ord_done_', '');
+
+                // Prevent double archiving
+                if (ARCHIVED_ORDERS_SET.has(orderId)) {
+                    return safeReply(interaction, { content: `⚠️ Order \`${orderId}\` sudah diselesaikan/diarsip.`, flags: [MessageFlags.Ephemeral] });
+                }
+
+                const { data: order } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
+                if (order?.status === 'Done') {
+                    ARCHIVED_ORDERS_SET.add(orderId);
+                    if (interaction.message) await interaction.message.delete().catch(() => null);
+                    return safeReply(interaction, { content: `⚠️ Order \`${orderId}\` sudah berstatus Done.`, flags: [MessageFlags.Ephemeral] });
+                }
+
+                ARCHIVED_ORDERS_SET.add(orderId);
                 await safeDeferUpdate(interaction);
-                return safeReply(interaction, { content: '❌ Deletion cancelled.', components: [] });
-            }
 
-            // ── btn_check_pay_ ────────────────────────────────
-            if (interaction.customId.startsWith('btn_check_pay_')) {
-                // Already deferred at top
-                const orderId = interaction.customId.replace('btn_check_pay_', '');
+                const rUsername = order?.roblox_username || 'N/A';
+                const prodName = order?.product_name || 'Quantumblox Store Product';
+                const qty = order?.qty || 1;
+                const amount = order?.amount ? `Rp. ${new Intl.NumberFormat('id-ID').format(order.amount)}` : 'N/A';
+                const buyerId = order?.buyer_id;
+                const buyerTag = order?.buyer_tag || 'Unknown';
 
-                const { data: pay, error: fetchPayError } = await supabase.from('pending_payments').select('*').eq('invoice_id', orderId).single();
-                if (fetchPayError || !pay)
-                    return safeReply(interaction, { content: '❌ Invalid or expired transaction.' });
+                // 1. Save Completed Status to DB
+                await supabase.from('orders').update({ status: 'Done', processed_by: interaction.user.id, processed_at: new Date().toISOString() }).eq('order_id', orderId);
 
-                try {
-                    const res = await axios.get(`https://app.pakasir.com/api/transactiondetail`, {
-                        params: {
-                            project: process.env.PAKASIR_SLUG,
-                            amount: pay.amount,
-                            order_id: orderId,
-                            api_key: process.env.PAKASIR_API_KEY
-                        },
-                        timeout: 15000
-                    });
+                // 2. Build Completed Archive Embed
+                const archiveEmbed = new EmbedBuilder()
+                    .setTitle(`✅ ORDER COMPLETED \u2014 ${orderId}`)
+                    .setColor('#2ecc71')
+                    .addFields(
+                        { name: '👤 Username Roblox', value: `\`\`\`${rUsername}\`\`\``, inline: false },
+                        { name: '📦 Detail Produk', value: `**${prodName}**`, inline: true },
+                        { name: '🔢 Jumlah', value: `\`${qty} Pcs\``, inline: true },
+                        { name: '💰 Total Transaksi', value: `\`${amount}\``, inline: true },
+                        { name: '💰 Payment Status', value: `🟢 **Paid (Automatic)**`, inline: true },
+                        { name: '🚚 Delivery Status', value: `🟢 **Done**`, inline: true },
+                        { name: '👤 Pembeli', value: buyerId ? `<@${buyerId}> (\`${buyerTag}\`)` : 'Unknown', inline: true },
+                        { name: '🆔 Order ID', value: `\`${orderId}\``, inline: true },
+                        { name: '✅ Diselesaikan Oleh', value: `<@${interaction.user.id}> (<t:${Math.floor(Date.now() / 1000)}:R>)`, inline: false }
+                    )
+                    .setTimestamp();
 
-                    if (res.data.transaction?.status === 'completed') {
-                        const { data: pidStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
-                        if (!pidStock || pidStock.length < pay.qty)
-                            return safeReply(interaction, { content: '⚠️ Payment confirmed but stock was depleted. Please contact an admin.' });
-
-                        const deliver = pidStock.map(s => s.content);
-                        const stockIds = pidStock.map(s => s.id);
-
-                        await supabase.from('stock').delete().in('id', stockIds);
-                        const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
-                        await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
-                        await supabase.from('pending_payments').delete().eq('invoice_id', orderId);
-                        invalidateProductCache();
-
-                        // Archive sold data for search
-                        archiveSoldData({
-                            orderId,
-                            productId: pay.product_id,
-                            productName: pay.product_id,
-                            buyerId: interaction.user.id,
-                            buyerTag: interaction.user.tag,
-                            items: deliver,
-                            qty: pay.qty,
-                            amount: pay.amount
-                        });
-
-                        const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
-                        const isAuction = pay.invoice_id.startsWith('AUC');
-
-                        // 1. Delivery to Buyer's DMs
-                        const buyerEmbed = new EmbedBuilder()
-                            .setTitle(isAuction ? '🏆  Auction Item Delivered' : '✅  Order Confirmed')
-                            .setColor(isAuction ? '#f1c40f' : '#00b894')
-                            .setDescription(isAuction
-                                ? `Congratulations! Your auction item for **${pay.product_id.replace('AUCTION: ', '')}** has been delivered.`
-                                : 'Your order has been processed successfully. Please keep this receipt for your records.')
-                            .addFields(
-                                { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                { name: 'Product', value: pay.product_id, inline: true },
-                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total Paid', value: fmt, inline: true }
-                            )
-                            .setTimestamp();
-
-                        if (isAuction) {
-                            buyerEmbed.addFields({ name: 'Item Details', value: `\`\`\`${deliver.join('\n')}\`\`\``, inline: false });
-                        } else {
-                            buyerEmbed.addFields({ name: 'Delivered Items', value: deliver.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false });
-                        }
-                        buyerEmbed.setTimestamp();
-
-                        await interaction.user.send({ embeds: [buyerEmbed] }).catch(() => { });
-
-                        // 2. Ephemeral Response on Dashboard
-                        const confirmEmbed = new EmbedBuilder()
-                            .setTitle(isAuction ? '⚖️  AUCTION ORDER CONFIRMED' : '✅  ORDER CONFIRMED')
-                            .setColor(isAuction ? '#f1c40f' : '#00b894')
-                            .setDescription(`Your request has been successfully processed.${isAuction ? ' As the winner, your exclusive items have been delivered below.' : ' Your items are ready for pickup.'}`)
-                            .addFields(
-                                { name: '📦 Product', value: `\`${pay.product_id}\``, inline: true },
-                                { name: '💰 Total Amount', value: `\`${fmt}\``, inline: true },
-                                { name: '🆔 Order ID', value: `\`${orderId}\``, inline: false }
-                            )
-                            .setTimestamp();
-                        await safeReply(interaction, { embeds: [confirmEmbed] });
-
-                        // 3. Fire-and-forget logging (don't block the user response)
-                        setImmediate(async () => {
-                            try {
-                                if (isAuction) {
-                                    const [transChan, deliveryChan] = await Promise.all([
-                                        client.channels.fetch(process.env.AUCTION_TRANSACTION_LOG_ID).catch(() => null),
-                                        client.channels.fetch(process.env.AUCTION_DELIVERY_LOG_ID).catch(() => null)
-                                    ]);
-                                    if (transChan) transChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('AUCTION TRANSACTION LOG').setColor('#f1c40f').addFields(
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                            { name: 'Buyer / Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Product', value: `\`${pay.product_id}\``, inline: true },
-                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
-                                            { name: 'Final Amount', value: `**${fmt}**`, inline: true },
-                                            { name: 'Status', value: '`COMPLETED`', inline: true }
-                                        ).setTimestamp()]
-                                    }).catch(() => { });
-                                    if (deliveryChan) deliveryChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('AUCTION DELIVERY LOG').setColor('#e17055').addFields(
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                            { name: 'Winner', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Product', value: `\`${pay.product_id}\``, inline: true },
-                                            { name: 'Status', value: '`Check your DM for product delivery`', inline: false }
-                                        ).setTimestamp()]
-                                    }).catch(() => { });
-                                } else {
-                                    const [histChan, payChan] = await Promise.all([
-                                        client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null),
-                                        client.channels.fetch(process.env.PAYMENT_LOG_CHANNEL_ID).catch(() => null)
-                                    ]);
-                                    if (histChan) histChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('Order Completed').setColor('#2d3436').addFields(
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                            { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Product', value: pay.product_id, inline: true },
-                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
-                                            { name: 'Total', value: fmt, inline: true },
-                                            { name: 'Process', value: 'Automatic', inline: true }
-                                        ).setTimestamp()]
-                                    }).catch(() => { });
-                                    if (payChan) payChan.send({
-                                        embeds: [new EmbedBuilder().setTitle('Payment Received').setColor('#0984e3').addFields(
-                                            { name: 'Order ID', value: `\`${orderId}\``, inline: false },
-                                            { name: 'Buyer', value: `<@${interaction.user.id}>`, inline: true },
-                                            { name: 'Qty', value: `${pay.qty}x`, inline: true },
-                                            { name: 'Total', value: fmt, inline: true },
-                                            { name: 'Status', value: 'Completed', inline: true }
-                                        ).setTimestamp()]
-                                    }).catch(() => { });
-                                }
-                            } catch (logErr) { console.warn('[LOG] Fire-and-forget logging error:', logErr.message); }
-                        });
-
-                        // 4. Post-Fulfillment (Role & Dashboard)
-                        const customerRoleId = process.env.COSTUMER_ROLE_ID;
-                        if (customerRoleId && interaction.member) {
-                            try {
-                                if (!interaction.member.roles.cache.has(customerRoleId)) {
-                                    await interaction.member.roles.add(customerRoleId);
-                                }
-                            } catch (roleErr) { console.error('[ROLE] Failed to add role:', roleErr.message); }
-                        }
-
-                        // Increment sold counter
-                        const cfg = loadConfig();
-                        cfg.totalSold = (cfg.totalSold || 0) + pay.qty;
-                        saveConfig(cfg);
-
-                        updateDashboard();
-                        if (!isAuction) updateDatabaseEmbed(pay.product_id);
-                        debounce('counting_track', () => updateCountingTrack(), 3000);
-
-                        return;
-                    } else {
-                        return safeReply(interaction, { content: '⏳ Payment not confirmed yet. Please complete the payment and try again.' });
+                // 3. Send EXACTLY ONCE to Archive Channel (1537424696646303826)
+                const archiveChannelId = process.env.ARCHIVE_LIST_CHANNEL_ID || process.env.ORDER_ARCHIVE_CHANNEL_ID || '1537424696646303826';
+                if (archiveChannelId) {
+                    const archiveChannel = await client.channels.fetch(archiveChannelId).catch(() => null);
+                    if (archiveChannel) {
+                        await archiveChannel.send({ embeds: [archiveEmbed] }).catch(() => null);
                     }
-                } catch (e) {
-                    const errMsg = e?.response?.data ? JSON.stringify(e.response.data) : e.message;
-                    console.error('Payment Check Error:', errMsg);
-                    return safeReply(interaction, { content: `❌ Error checking payment: ${e.message}` });
+                }
+
+                // 4. Delete original active order ticket from waiting-list channel so waiting-list stays 100% clean
+                if (interaction.message) {
+                    await interaction.message.delete().catch(() => null);
+                }
+
+                // 5. Send Ephemeral Confirmation
+                await interaction.followUp({ content: `🟢 Order \`${orderId}\` telah berhasil diselesaikan dan dipindahkan ke Archive!`, flags: [MessageFlags.Ephemeral] }).catch(() => null);
+
+                // 6. DM Buyer receipt with Quantumblox Store branding
+                if (buyerId) {
+                    const buyerUser = await client.users.fetch(buyerId).catch(() => null);
+                    if (buyerUser) {
+                        buyerUser.send({
+                            embeds: [new EmbedBuilder()
+                                .setTitle('🟢 Order Completed!')
+                                .setColor('#2ecc71')
+                                .setDescription(`Orderan Anda **${orderId}** (${prodName}) untuk Username Roblox **${rUsername}** telah selesai dikirim!\n\nTerima kasih telah berbelanja di **Quantumblox Store**!`)
+                                .setTimestamp()]
+                        }).catch(() => null);
+                    }
                 }
                 return;
+            }
+
+            // ── btn_ord_cancel_ ────────────────────────────────
+            if (interaction.customId.startsWith('btn_ord_cancel_')) {
+                if (!isOrderAdmin(interaction)) {
+                    return safeReply(interaction, { content: '❌ Hanya Owner/Admin yang memiliki akses untuk membatalkan order.', flags: [MessageFlags.Ephemeral] });
+                }
+
+                const orderId = interaction.customId.replace('btn_ord_cancel_', '');
+
+                if (ARCHIVED_ORDERS_SET.has(orderId)) {
+                    return safeReply(interaction, { content: `⚠️ Order \`${orderId}\` sudah dibatalkan/diarsip.`, flags: [MessageFlags.Ephemeral] });
+                }
+
+                const { data: order } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
+                if (order?.status === 'Cancelled') {
+                    ARCHIVED_ORDERS_SET.add(orderId);
+                    if (interaction.message) await interaction.message.delete().catch(() => null);
+                    return safeReply(interaction, { content: `⚠️ Order \`${orderId}\` sudah berstatus Cancelled.`, flags: [MessageFlags.Ephemeral] });
+                }
+
+                ARCHIVED_ORDERS_SET.add(orderId);
+                await safeDeferUpdate(interaction);
+
+                const rUsername = order?.roblox_username || 'N/A';
+                const prodName = order?.product_name || 'Quantumblox Store Product';
+                const qty = order?.qty || 1;
+                const amount = order?.amount ? `Rp. ${new Intl.NumberFormat('id-ID').format(order.amount)}` : 'N/A';
+                const buyerId = order?.buyer_id;
+                const buyerTag = order?.buyer_tag || 'Unknown';
+
+                // 1. Save Cancelled Status to DB
+                await supabase.from('orders').update({ status: 'Cancelled', processed_by: interaction.user.id, processed_at: new Date().toISOString() }).eq('order_id', orderId);
+
+                // 2. Build Cancelled Archive Embed
+                const cancelEmbed = new EmbedBuilder()
+                    .setTitle(`❌ ORDER CANCELLED \u2014 ${orderId}`)
+                    .setColor('#e74c3c')
+                    .addFields(
+                        { name: '👤 Username Roblox', value: `\`\`\`${rUsername}\`\`\``, inline: false },
+                        { name: '📦 Detail Produk', value: `**${prodName}**`, inline: true },
+                        { name: '🔢 Jumlah', value: `\`${qty} Pcs\``, inline: true },
+                        { name: '💰 Total Transaksi', value: `\`${amount}\``, inline: true },
+                        { name: '💰 Payment Status', value: `🟢 **Paid (Automatic)**`, inline: true },
+                        { name: '🚚 Delivery Status', value: `🔴 **Cancelled**`, inline: true },
+                        { name: '👤 Pembeli', value: buyerId ? `<@${buyerId}> (\`${buyerTag}\`)` : 'Unknown', inline: true },
+                        { name: '🆔 Order ID', value: `\`${orderId}\``, inline: true },
+                        { name: '❌ Dibatalkan Oleh', value: `<@${interaction.user.id}> (<t:${Math.floor(Date.now() / 1000)}:R>)`, inline: false }
+                    )
+                    .setTimestamp();
+
+                // 3. Send to Archive Channel
+                const archiveChannelId = process.env.ARCHIVE_LIST_CHANNEL_ID || process.env.ORDER_ARCHIVE_CHANNEL_ID || '1537424696646303826';
+                if (archiveChannelId) {
+                    const archiveChannel = await client.channels.fetch(archiveChannelId).catch(() => null);
+                    if (archiveChannel) {
+                        await archiveChannel.send({ embeds: [cancelEmbed] }).catch(() => null);
+                    }
+                }
+
+                // 4. Remove active order ticket from waiting-list channel
+                if (interaction.message) {
+                    await interaction.message.delete().catch(() => null);
+                }
+
+                // 5. Send Ephemeral Confirmation
+                await interaction.followUp({ content: `🔴 Order \`${orderId}\` telah dibatalkan dan dipindahkan ke Archive.`, flags: [MessageFlags.Ephemeral] }).catch(() => null);
+
+                // 6. DM Buyer
+                if (buyerId) {
+                    const buyerUser = await client.users.fetch(buyerId).catch(() => null);
+                    if (buyerUser) {
+                        buyerUser.send({
+                            embeds: [new EmbedBuilder()
+                                .setTitle('🔴 Order Cancelled')
+                                .setColor('#e74c3c')
+                                .setDescription(`Orderan Anda **${orderId}** (${prodName}) telah dibatalkan. Silakan hubungi admin **Quantumblox Store** jika ada pertanyaan.`)
+                                .setTimestamp()]
+                        }).catch(() => null);
+                    }
+                }
+            }
+
+
+
+            // ── btn_order_search ───────────────────────────────
+            if (interaction.customId === 'btn_order_search') {
+                const modal = new ModalBuilder().setCustomId('mod_order_search').setTitle('Cari Order / Roblox Username');
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder().setCustomId('query').setLabel('Username Roblox / Order ID').setPlaceholder('e.g. UsernameRoblox123 atau INV173...').setStyle(TextInputStyle.Short).setRequired(true)
+                    )
+                );
+                return interaction.showModal(modal);
             }
 
             // Unhandled button
@@ -2648,14 +2196,18 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'sel_admin_menu') {
                 const choice = interaction.values[0];
 
+                if (choice === 'opt_manage_orders') {
+                    const payload = await renderOrderManager('ACTIVE');
+                    return safeReply(interaction, { ...payload, flags: [MessageFlags.Ephemeral] });
+                }
+
                 if (choice === 'opt_add_p') {
                     const modal = new ModalBuilder().setCustomId('mod_p_add').setTitle('➕ Add New Product');
                     modal.addComponents(
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id').setLabel('Unique ID').setPlaceholder('e.g. NETFLIX_PREMIUM').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Netflix 1 Bulan').setStyle(TextInputStyle.Short).setRequired(true)),
                         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price').setPlaceholder('e.g. Rp. 10.000').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('Format').setPlaceholder('e.g. Email|Pass').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue('-').setStyle(TextInputStyle.Paragraph).setRequired(false))
+                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_buy').setLabel('Minimal Buy (Min. Purchase)').setValue('1').setPlaceholder('e.g. 1 or 5').setStyle(TextInputStyle.Short).setRequired(true))
                     );
                     return safeModal(interaction, modal);
                 }
@@ -2747,6 +2299,24 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
+            // ── sel_emoji_ls_pick ─────────────────────────────
+            if (interaction.customId === 'sel_emoji_ls_pick') {
+                const key = interaction.values[0];
+                const config = loadConfig();
+                const current = config.customEmoji?.liveStock?.[key] || DEFAULT_EMOJI.liveStock[key] || '';
+                const modal = new ModalBuilder().setCustomId(`mod_emoji_ls_${key}`).setTitle('Set Custom Emoji');
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('emoji')
+                        .setLabel(`Emoji untuk ${EMOJI_LABELS.liveStock[key] || key}`)
+                        .setValue(current)
+                        .setPlaceholder('Paste emoji (e.g. 📦, 🛒, 🌱) or Discord custom emoji (<:name:id>)')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(false)
+                ));
+                return await safeModal(interaction, modal);
+            }
+
             // ── sel_p_maintenance_pick ────────────────────────
             if (interaction.customId === 'sel_p_maintenance_pick') {
                 await safeDeferUpdate(interaction);
@@ -2777,8 +2347,7 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('New Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
                     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('New Price').setValue(p.price).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('format').setLabel('New Format').setValue(p.format).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('New Description').setValue(p.description || '-').setStyle(TextInputStyle.Paragraph).setRequired(false))
+                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('min_buy').setLabel('Minimal Buy (Min. Purchase)').setValue(String(p.min_buy || 1)).setStyle(TextInputStyle.Short).setRequired(true))
                 );
                 return await safeModal(interaction, modal);
             }
@@ -2805,13 +2374,13 @@ client.on('interactionCreate', async interaction => {
             // ── sel_unified_add_pick ─────────────────────────────
             if (interaction.customId === 'sel_unified_add_pick') {
                 const pid = interaction.values[0];
-                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Add Stock', pid));
+                const modal = new ModalBuilder().setCustomId(`mod_db_add_${pid}`).setTitle(safeTitle('Tambah Stock', pid));
                 modal.addComponents(new ActionRowBuilder().addComponents(
                     new TextInputBuilder()
-                        .setCustomId('data')
-                        .setLabel('Stock Data (one entry per line)')
-                        .setPlaceholder('UsernameSteam|PasswordSteam|EmailAcc|PasswordAcc')
-                        .setStyle(TextInputStyle.Paragraph)
+                        .setCustomId('amount')
+                        .setLabel('Jumlah Stock (Amount)')
+                        .setPlaceholder('Masukkan jumlah stock yang ingin ditambahkan (e.g. 10)...')
+                        .setStyle(TextInputStyle.Short)
                         .setRequired(true)
                 ));
                 return await safeModal(interaction, modal);
@@ -2820,33 +2389,33 @@ client.on('interactionCreate', async interaction => {
             // ── sel_unified_edit_pick ────────────────────────────
             if (interaction.customId === 'sel_unified_edit_pick') {
                 const pid = interaction.values[0];
-                // Already deferred at top
-
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to edit for this product.' });
-
-                const select = new StringSelectMenuBuilder()
-                    .setCustomId(`sel_db_edit_${pid}`)
-                    .setPlaceholder('Select an entry to edit...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-
-                return safeReply(interaction, { content: `✏️ Editing stock for \`${pid}\`. Select an entry:`, components: [new ActionRowBuilder().addComponents(select)] });
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                const modal = new ModalBuilder().setCustomId(`mod_db_edit_${pid}`).setTitle(safeTitle('Edit Stock', pid));
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('amount')
+                        .setLabel('Total Stock Baru (Amount)')
+                        .setValue(String(p?.stock || 0))
+                        .setPlaceholder('Masukkan total stock baru (e.g. 50)...')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(true)
+                ));
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_unified_del_pick ─────────────────────────────
             if (interaction.customId === 'sel_unified_del_pick') {
                 const pid = interaction.values[0];
-                // Already deferred at top
-
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete for this product.' });
-
-                const select = new StringSelectMenuBuilder()
-                    .setCustomId(`sel_db_del_${pid}`)
-                    .setPlaceholder('Select an entry to delete...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-
-                return safeReply(interaction, { content: `🗑️ Deleting stock from \`${pid}\`. Select an entry:`, components: [new ActionRowBuilder().addComponents(select)] });
+                const modal = new ModalBuilder().setCustomId(`mod_db_del_${pid}`).setTitle(safeTitle('Kurangi Stock', pid));
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId('amount')
+                        .setLabel('Jumlah Stock yang Ingin Dikurangi')
+                        .setPlaceholder('Masukkan jumlah yang ingin dikurangi (e.g. 5)...')
+                        .setStyle(TextInputStyle.Short)
+                        .setRequired(true)
+                ));
+                return await safeModal(interaction, modal);
             }
 
             // ── sel_buy ───────────────────────────────────────
@@ -2867,11 +2436,30 @@ client.on('interactionCreate', async interaction => {
                     });
                 }
 
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                const minBuy = Math.max(1, parseInt(p?.min_buy) || 1);
+
                 // Show modal — can't defer before showModal
                 const modal = new ModalBuilder().setCustomId(`mod_buy_${pid}`).setTitle('Buy Product');
-                modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder().setCustomId('q').setLabel('Quantity').setPlaceholder('e.g. 1').setStyle(TextInputStyle.Short).setRequired(true)
-                ));
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId('q')
+                            .setLabel(`Jumlah / Quantity (Minimal Buy: ${minBuy})`)
+                            .setPlaceholder(`e.g. ${minBuy}`)
+                            .setValue(String(minBuy))
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId('roblox')
+                            .setLabel('Username Roblox (Wajib)')
+                            .setPlaceholder('Masukkan Username Roblox Anda...')
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                    )
+                );
                 return await safeModal(interaction, modal);
             }
 
@@ -2906,295 +2494,17 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            // ── sel_auction_admin ────────────────────────────
-            if (interaction.customId === 'sel_auction_admin') {
-                const choice = interaction.values[0];
-
-                if (choice === 'opt_add_auction') {
-                    const modal = new ModalBuilder().setCustomId('mod_auction_add').setTitle('⚖️ Create Auction');
-                    modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID').setPlaceholder('e.g. PWACCLVL93').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setPlaceholder('e.g. 50000').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue('5000').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Duration (Minutes)').setPlaceholder('e.g. 60').setStyle(TextInputStyle.Short).setRequired(true))
-                    );
-                    return await safeModal(interaction, modal);
-                }
-
-                if (choice === 'opt_edit_active_auction') {
-                    await safeDefer(interaction);
-                    const { data: auctions } = await supabase.from('auctions').select('*').in('status', ['pending', 'active']).order('created_at', { ascending: false });
-                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No pending or active auctions found to edit.' });
-
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_active_pick').setPlaceholder('Select an auction to edit...');
-                    auctions.forEach(a => menu.addOptions({ label: `${a.name} (${a.status})`, description: `Product ID: ${a.product_id} | Base: ${a.base_price}`, value: a.id }));
-                    return safeReply(interaction, { content: '✏️ **Edit Auction Product**\nSelect an active/pending auction to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
-                }
-
-                if (choice === 'opt_add_category') {
-                    const modal = new ModalBuilder().setCustomId('mod_add_category').setTitle('🏷️ Create Product');
-                    modal.addComponents(
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID (Manual)').setPlaceholder('e.g. PWACCLVL5').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setPlaceholder('e.g. Pixel World Acc').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setPlaceholder('e.g. Gaming').setStyle(TextInputStyle.Short).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-                        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('banner').setLabel('Image Banner URL (Optional)').setPlaceholder('https://...').setStyle(TextInputStyle.Short).setRequired(false))
-                    );
-                    return await safeModal(interaction, modal);
-                }
-
-                if (choice === 'opt_toggle_auction') {
-                    await safeDefer(interaction);
-                    const { data: auctions } = await supabase.from('auctions').select('*').in('status', ['pending', 'active']).order('created_at', { ascending: false });
-                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No pending or active auctions found.' });
-
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_toggle_pick').setPlaceholder('Select an auction to toggle status...');
-                    auctions.forEach(a => menu.addOptions({ label: `${a.name} (${a.status})`, description: `Base: ${a.base_price}`, value: a.id }));
-                    return safeReply(interaction, { content: '⚙️ **Auction Manager**\nSelect an auction to toggle its status:', components: [new ActionRowBuilder().addComponents(menu)] });
-                }
-
-                if (choice === 'opt_edit_category') {
-                    await safeDefer(interaction);
-                    const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
-                    if (!all || all.length === 0) return safeReply(interaction, { content: '❌ No products found to edit.' });
-
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_edit_pick').setPlaceholder('Select a product to edit...');
-                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Cat: ${p.category_name || '—'}`, value: p.id }));
-                    return safeReply(interaction, { content: '✏️ **Edit Product**\nSelect a product to modify:', components: [new ActionRowBuilder().addComponents(menu)] });
-                }
-
-                if (choice === 'opt_delete_category') {
-                    await safeDefer(interaction);
-                    const { data: all } = await supabase.from('products').select('*').eq('system_type', 'auction').order('name');
-                    if (!all || all.length === 0) return safeReply(interaction, { content: '❌ No products found to delete.' });
-
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick').setPlaceholder('Select a product to DELETE...');
-                    all.forEach(p => menu.addOptions({ label: p.name, description: `ID: ${p.id} | Cat: ${p.category_name || '—'}`, value: p.id }));
-                    return safeReply(interaction, { content: '🗑️ **Delete Product**\nSelect a product to permanently remove:', components: [new ActionRowBuilder().addComponents(menu)] });
-                }
-
-                if (choice === 'opt_delete_auction') {
-                    await safeDefer(interaction);
-                    const { data: auctions } = await supabase.from('auctions').select('*').eq('status', 'pending').order('created_at', { ascending: false });
-                    if (!auctions || auctions.length === 0) return safeReply(interaction, { content: '❌ No pending auction products found in the database.' });
-
-                    console.log(`[SECURITY] Pending product loaded: Found ${auctions.length} pending auctions. Loaded by Admin: ${interaction.user.tag}`);
-
-                    const menu = new StringSelectMenuBuilder().setCustomId('sel_auction_delete_pick_auc').setPlaceholder('Select a pending auction to delete...');
-                    auctions.slice(0, 25).forEach(a => {
-                        menu.addOptions({ 
-                            label: `${a.name} (${a.status})`, 
-                            description: `ID: ${a.id} | Product: ${a.product_id} | Bid: Rp ${a.current_bid.toLocaleString('id-ID')}`, 
-                            value: a.id 
-                        });
-                    });
-                    return safeReply(interaction, { 
-                        content: '🗑️ **Delete Pending Auction Product**\nSelect the pending auction product you wish to permanently remove:', 
-                        components: [new ActionRowBuilder().addComponents(menu)] 
-                    });
-                }
-
-                if (choice === 'opt_custom_emoji_auction') {
-                    // Already deferred at top
-                    const keys = Object.keys(DEFAULT_EMOJI.auction);
-                    const config = loadConfig();
-                    // Split into 2 pages if keys > 25 (Discord limit), but we have 13 keys so it's fine
-                    const menu = new StringSelectMenuBuilder()
-                        .setCustomId('sel_emoji_auc_pick')
-                        .setPlaceholder('Select emoji to customize...')
-                        .addOptions(keys.map(k => {
-                            const current = config.customEmoji?.auction?.[k] || DEFAULT_EMOJI.auction[k] || '(none)';
-                            return {
-                                label: EMOJI_LABELS.auction[k] || k,
-                                description: `Current: ${current}`,
-                                value: k
-                            };
-                        }));
-                    return safeReply(interaction, {
-                        content: '🎨 **Set Custom Emoji — Auction Dashboard**\nSelect which emoji you want to change:',
-                        components: [new ActionRowBuilder().addComponents(menu)]
-                    });
-                }
-
-                return;
-            }
-
-            // ── sel_stock_add_pick ───────────────────────────
-            if (interaction.customId === 'sel_stock_add_pick') {
-                const pid = interaction.values[0];
-                const modal = new ModalBuilder().setCustomId(`mod_auction_add_stock`).setTitle(safeTitle('Add Stock', pid));
-                modal.addComponents(
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Confirmed Product ID').setValue(pid).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('content').setLabel('Stock Content (one per line)').setPlaceholder('item1\nitem2...').setStyle(TextInputStyle.Paragraph).setRequired(true))
-                );
-                return await safeModal(interaction, modal);
-            }
-
-            // ── sel_stock_edit_pick ──────────────────────────
-            if (interaction.customId === 'sel_stock_edit_pick') {
-                const pid = interaction.values[0];
-                await safeDefer(interaction);
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to edit.' });
-
-                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_edit_${pid}`).setPlaceholder('Select an entry to edit...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                return safeReply(interaction, { content: '✏️ Select an entry to edit:', components: [new ActionRowBuilder().addComponents(select)] });
-            }
-
-            // ── sel_stock_del_pick ───────────────────────────
-            if (interaction.customId === 'sel_stock_del_pick') {
-                const pid = interaction.values[0];
-                await safeDefer(interaction);
-                const { data: stock } = await supabase.from('stock').select('*').eq('product_id', pid).order('created_at', { ascending: false });
-                if (!stock || stock.length === 0) return safeReply(interaction, { content: '❌ No stock entries to delete.' });
-
-                const select = new StringSelectMenuBuilder().setCustomId(`sel_db_del_${pid}`).setPlaceholder('Select an entry to delete...');
-                stock.slice(0, 25).forEach((s, i) => select.addOptions({ label: `${i + 1}. ${s.content.slice(0, 40)}`, value: s.id }));
-                return safeReply(interaction, { content: '🗑️ Select an entry to delete:', components: [new ActionRowBuilder().addComponents(select)] });
-            }
-
-            // ── sel_auction_toggle_pick ──────────────────────
-            if (interaction.customId === 'sel_auction_toggle_pick') {
-                await safeDeferUpdate(interaction);
-                const aid = interaction.values[0];
-                const { data: auction } = await supabase.from('auctions').select('status, name').eq('id', aid).single();
-                if (!auction) return safeReply(interaction, { content: '❌ Auction not found.', components: [] });
-
-                if (auction.status === 'active') {
-                    await endAuction(aid, true);
-                    await safeReply(interaction, { content: `✅ Auction \`${auction.name}\` has been **CLOSED**.`, components: [] });
-                } else {
-                    await supabase.from('auctions').update({ status: 'active' }).eq('id', aid);
-                    console.log(`[SECURITY] Auction started: Manually activated ${aid} (${auction.name})`);
-                    await safeReply(interaction, { content: `✅ Auction \`${auction.name}\` is now **ACTIVE**.`, components: [] });
-                }
-                updateAuctionDashboard();
-                return;
-            }
-
-            // ── sel_auction_edit_pick ────────────────────────
-            if (interaction.customId === 'sel_auction_edit_pick') {
-                const pid = interaction.values[0];
-                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (!p) return safeReply(interaction, { content: '❌ Product not found.', flags: [MessageFlags.Ephemeral] });
-
-                const modal = new ModalBuilder().setCustomId(`mod_auction_edit_${pid}`).setTitle('✏️ Edit Product');
-                modal.addComponents(
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Product Name').setValue(p.name).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('category').setLabel('Category Name').setValue(p.category_name || '').setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('desc').setLabel('Description').setValue(p.description || '').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('banner').setLabel('Image Banner URL (Optional)').setValue(p.banner_url || '').setPlaceholder('https://...').setStyle(TextInputStyle.Short).setRequired(false))
-                );
-                return await safeModal(interaction, modal);
-            }
-
-            // ── sel_auction_edit_active_pick ─────────────────
-            if (interaction.customId === 'sel_auction_edit_active_pick') {
-                const aucId = interaction.values[0];
-                const { data: a } = await supabase.from('auctions').select('*').eq('id', aucId).single();
-                if (!a) return safeReply(interaction, { content: '❌ Auction not found.', flags: [MessageFlags.Ephemeral] });
-
-                // Calculate remaining duration in minutes
-                let remainingMins = 60;
-                if (a.end_time) {
-                    const diffMs = new Date(a.end_time) - Date.now();
-                    remainingMins = Math.max(1, Math.round(diffMs / 60000));
-                }
-
-                const modal = new ModalBuilder().setCustomId(`mod_edit_active_auction_${aucId}`).setTitle('✏️ Edit Auction Settings');
-                modal.addComponents(
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('pid').setLabel('Product ID').setValue(a.product_id || '').setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_price').setLabel('Start Price (Rp)').setValue(String(a.base_price || 0)).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('increment').setLabel('Bid Increment (Rp)').setValue(String(a.bid_increment || 5000)).setStyle(TextInputStyle.Short).setRequired(true)),
-                    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('duration').setLabel('Remaining Duration (Minutes)').setValue(String(remainingMins)).setStyle(TextInputStyle.Short).setRequired(true))
-                );
-                return await safeModal(interaction, modal);
-            }
-
-            // ── sel_auction_delete_pick ────────────────────────
-            if (interaction.customId === 'sel_auction_delete_pick') {
-                const pid = interaction.values[0];
-                await safeDeferUpdate(interaction);
-
-                const { error: delErr } = await supabase.from('products').delete().eq('id', pid);
-                if (delErr) return safeReply(interaction, { content: `❌ Failed to delete category: ${delErr.message}`, components: [] });
-
-                await safeReply(interaction, { content: `✅ Category \`${pid}\` has been permanently deleted.`, components: [] });
-                updateDashboard();
-                updateStockDashboard();
-                return;
-            }
-
-            // ── sel_auction_delete_pick_auc ────────────────────
-            if (interaction.customId === 'sel_auction_delete_pick_auc') {
-                if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
-                    return safeReply(interaction, { content: '❌ Only admins can execute this action.', components: [] });
-                }
-                const aid = interaction.values[0];
-                await safeDeferUpdate(interaction);
-
-                const { data: auction } = await supabase.from('auctions').select('*').eq('id', aid).single();
-                if (!auction) return safeReply(interaction, { content: '❌ Auction product not found.', components: [] });
-
-                if (auction.status !== 'pending') {
-                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to load confirm-delete for non-pending auction ${aid} (Status: ${auction.status})`);
-                    return safeReply(interaction, { content: `❌ Deletion rejected. Only pending auction products can be deleted. This product is currently: **${auction.status.toUpperCase()}**.`, components: [] });
-                }
-
-                // Check bids presence
-                const { data: bids } = await supabase.from('auction_bids').select('id').eq('auction_id', aid).limit(1);
-                if (bids && bids.length > 0) {
-                    console.warn(`[SECURITY] Invalid delete prevented: User ${interaction.user.tag} attempted to load confirm-delete for auction ${aid} with bids.`);
-                    return safeReply(interaction, { content: '❌ Cannot delete this auction product because it contains bid records in history. To preserve database integrity, products with active/past bids cannot be removed.', components: [] });
-                }
-
-                const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId(`btn_confirm_del_auc_${aid}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
-                    new ButtonBuilder().setCustomId(`btn_cancel_del_auc_${aid}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-                );
-                return safeReply(interaction, {
-                    content: `⚠️ **Confirm Auction Deletion**\nAre you sure you want to permanently delete the pending auction for **${auction.name}**?\n*This action will remove the auction item but will keep the underlying base product and stock completely intact.*`,
-                    components: [row]
-                });
-            }
-            // ── sel_emoji_ls_pick ────────────────────────────
-            if (interaction.customId === 'sel_emoji_ls_pick') {
-                const key = interaction.values[0];
-                const config = loadConfig();
-                const current = config.customEmoji?.liveStock?.[key] || DEFAULT_EMOJI.liveStock[key] || '';
-                const modal = new ModalBuilder().setCustomId(`mod_emoji_ls_${key}`).setTitle(`🎨 Set Emoji: ${EMOJI_LABELS.liveStock[key] || key}`);
-                modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('emoji')
-                        .setLabel('New Emoji (leave empty for default)')
-                        .setValue(current)
-                        .setStyle(TextInputStyle.Short)
-                        .setRequired(false)
-                        .setMaxLength(50)
-                ));
-                return await safeModal(interaction, modal);
-            }
-
-            // ── sel_emoji_auc_pick ───────────────────────────
-            if (interaction.customId === 'sel_emoji_auc_pick') {
-                const key = interaction.values[0];
-                const config = loadConfig();
-                const current = config.customEmoji?.auction?.[key] || DEFAULT_EMOJI.auction[key] || '';
-                const modal = new ModalBuilder().setCustomId(`mod_emoji_auc_${key}`).setTitle(`🎨 Set Emoji: ${EMOJI_LABELS.auction[key] || key}`);
-                modal.addComponents(new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('emoji')
-                        .setLabel('New Emoji (leave empty for default)')
-                        .setValue(current)
-                        .setStyle(TextInputStyle.Short)
-                        .setRequired(false)
-                        .setMaxLength(50)
-                ));
-                return await safeModal(interaction, modal);
+            // ── sel_order_filter ──────────────────────────────
+            if (interaction.customId === 'sel_order_filter') {
+                const val = interaction.values[0];
+                const filterStatus = val.replace('filter_', '');
+                const payload = await renderOrderManager(filterStatus);
+                return safeUpdate(interaction, payload);
             }
 
             console.warn(`[WARN] Unhandled select menu interaction: ${interaction.customId}`);
+
+
             if (!interaction.deferred && !interaction.replied) {
                 await safeReply(interaction, { content: '❌ Select menu handler not found.', flags: [MessageFlags.Ephemeral] });
             }
@@ -3256,19 +2566,22 @@ client.on('interactionCreate', async interaction => {
                 const id = interaction.fields.getTextInputValue('id').trim().toUpperCase();
                 const name = interaction.fields.getTextInputValue('name');
                 const price = interaction.fields.getTextInputValue('price');
-                const format = interaction.fields.getTextInputValue('format');
-                const desc = interaction.fields.getTextInputValue('desc') || '-';
+                const minBuyRaw = interaction.fields.getTextInputValue('min_buy');
+                const minBuy = Math.max(1, parseInt(minBuyRaw) || 1);
+                const format = 'Roblox';
+                const desc = '-';
 
                 await safeDefer(interaction);
 
-                const { data: existing } = await supabase.from('products').select('id').eq('id', id).single();
-                if (existing) return safeReply(interaction, { content: `❌ Product ID \`${id}\` already exists.` });
+                const existingRes = await withRetry(() => supabase.from('products').select('id').eq('id', id).single(), 3, 1000).catch(() => null);
+                if (existingRes?.data) return safeReply(interaction, { content: `❌ Product ID \`${id}\` already exists.` });
 
                 const { error: insertErr } = await safeInsertProduct({
                     id,
                     name,
                     stock: 0,
                     price: formatPrice(price),
+                    min_buy: minBuy,
                     format,
                     description: desc,
                     system_type: 'regular'
@@ -3276,7 +2589,7 @@ client.on('interactionCreate', async interaction => {
 
                 if (insertErr) return safeReply(interaction, { content: `❌ Failed to add product: ${insertErr.message}` });
 
-                await safeReply(interaction, { content: `✅ Product \`${id}\` added successfully!` });
+                await safeReply(interaction, { content: `✅ Product \`${id}\` added successfully! (Min. Buy: ${minBuy})` });
                 updateDashboard();
                 updateDatabaseEmbed(id).catch(e => console.error(`[DB EMBED] Failed for '${id}': ${e.message}`));
                 return;
@@ -3287,21 +2600,34 @@ client.on('interactionCreate', async interaction => {
                 const pid = interaction.customId.replace('mod_p_edit_', '');
                 const name = interaction.fields.getTextInputValue('name');
                 const price = interaction.fields.getTextInputValue('price');
-                const format = interaction.fields.getTextInputValue('format');
-                const desc = interaction.fields.getTextInputValue('desc') || '-';
+                const minBuyRaw = interaction.fields.getTextInputValue('min_buy');
+                const minBuy = Math.max(1, parseInt(minBuyRaw) || 1);
+                const format = 'Roblox';
+                const desc = '-';
 
                 await safeDefer(interaction);
 
-                const { error: updateErr } = await supabase.from('products').update({
+                let { error: updateErr } = await supabase.from('products').update({
                     name,
                     price: formatPrice(price),
+                    min_buy: minBuy,
                     format,
                     description: desc
                 }).eq('id', pid);
 
+                if (updateErr && updateErr.code === '42703') {
+                    const res = await supabase.from('products').update({
+                        name,
+                        price: formatPrice(price),
+                        format,
+                        description: desc
+                    }).eq('id', pid);
+                    updateErr = res.error;
+                }
+
                 if (updateErr) return safeReply(interaction, { content: `❌ Failed to update product: ${updateErr.message}` });
 
-                await safeReply(interaction, { content: `✅ Product \`${pid}\` updated!` });
+                await safeReply(interaction, { content: `✅ Product \`${pid}\` updated! (Min. Buy: ${minBuy})` });
                 invalidateProductCache();
                 debounce('dashboard', () => updateDashboard());
                 return;
@@ -3361,45 +2687,9 @@ client.on('interactionCreate', async interaction => {
 
                 // Fire-and-forget dashboard update
                 updateDashboard().catch(() => {});
+                updateUnifiedMonitor().catch(() => {});
                 return;
             }
-
-            // ── mod_emoji_auc_ ────────────────────────────────
-            if (interaction.customId.startsWith('mod_emoji_auc_')) {
-                await safeDefer(interaction);
-                const key = interaction.customId.replace('mod_emoji_auc_', '');
-                const emojiInput = interaction.fields.getTextInputValue('emoji')?.trim() || '';
-
-                // Validate
-                if (emojiInput.length > 0 && !isValidEmoji(emojiInput)) {
-                    return safeReply(interaction, {
-                        content: `❌ **Invalid emoji:** \`${emojiInput}\`\n\nSupported formats:\n• Unicode emoji (e.g. 🎮 ⭐ ⚖️)\n• Discord custom emoji (e.g. \`<:name:id>\`)\n• Animated emoji (e.g. \`<a:name:id>\`)\n• Leave empty to reset to default.`
-                    });
-                }
-
-                const config = loadConfig();
-                if (!config.customEmoji) config.customEmoji = {};
-                if (!config.customEmoji.auction) config.customEmoji.auction = {};
-
-                if (emojiInput.length === 0) {
-                    delete config.customEmoji.auction[key];
-                } else {
-                    config.customEmoji.auction[key] = emojiInput;
-                }
-
-                saveConfig(config);
-                _lastAuctionHash = ''; // Force refresh
-
-                const displayEmoji = emojiInput || DEFAULT_EMOJI.auction[key] || '(default)';
-                await safeReply(interaction, {
-                    content: `✅ Emoji for **${EMOJI_LABELS.auction[key] || key}** updated to: ${displayEmoji}`
-                });
-
-                // Fire-and-forget dashboard update
-                updateAuctionDashboard().catch(() => {});
-                return;
-            }
-
             // ── mod_manual_pay ────────────────────────────────
             if (interaction.customId === 'mod_manual_pay') {
                 const inv = interaction.fields.getTextInputValue('inv').trim();
@@ -3408,50 +2698,15 @@ client.on('interactionCreate', async interaction => {
                 const { data: pay } = await supabase.from('pending_payments').select('*').eq('invoice_id', inv).single();
                 if (!pay) return safeReply(interaction, { content: `❌ Order ID \`${inv}\` not found.` });
 
-                // Parallelize stock check and remaining count (or join)
-                const { data: prodStock } = await supabase.from('stock').select('*').eq('product_id', pay.product_id).limit(pay.qty);
-                if (!prodStock || prodStock.length < pay.qty)
-                    return safeReply(interaction, { content: '❌ Insufficient stock to fulfill this order.' });
-
-                const items = prodStock.map(s => s.content);
-                const stockIds = prodStock.map(s => s.id);
-
-                await supabase.from('stock').delete().in('id', stockIds);
-                const { data: remaining } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pay.product_id);
-                await supabase.from('products').update({ stock: remaining.length }).eq('id', pay.product_id);
-                await supabase.from('pending_payments').delete().eq('invoice_id', inv);
-
-                // Archive sold data for search
-                archiveSoldData({
-                    orderId: inv,
-                    productId: pay.product_id,
-                    productName: pay.product_id,
-                    buyerId: pay.user_id,
-                    buyerTag: buyer?.tag || 'Unknown',
-                    items: items,
-                    qty: pay.qty,
-                    amount: pay.amount
-                });
-
-                const fmt = `Rp. ${new Intl.NumberFormat('id-ID').format(pay.amount)}`;
-
                 const buyer = await client.users.fetch(pay.user_id).catch(() => null);
-                if (buyer) {
-                    await buyer.send({
-                        embeds: [new EmbedBuilder()
-                            .setTitle('✅  Order Confirmed').setColor('#00b894')
-                            .setDescription('Your order has been processed successfully. Please keep this receipt for your records.')
-                            .addFields(
-                                { name: 'Order ID', value: `\`${inv}\``, inline: false },
-                                { name: 'Product', value: pay.product_id, inline: true },
-                                { name: 'Quantity', value: `${pay.qty}x`, inline: true },
-                                { name: 'Total Paid', value: fmt, inline: true },
-                                { name: 'Delivered Items', value: items.map((d, i) => `**${i + 1}.** \`${d}\``).join('\n') || '—', inline: false }
-                            )
-                            .setTimestamp()
-                        ]
-                    }).catch(() => { });
+                const rUsername = pay.roblox_username || ROBLOX_PAYMENTS_CACHE.get(inv) || 'N/A';
+                const result = await processOrderPaymentSuccess(pay, rUsername, buyer);
+
+                if (result.reason === 'stock_depleted') {
+                    return safeReply(interaction, { content: '❌ Insufficient stock to fulfill this order.' });
                 }
+
+                await safeReply(interaction, { content: `✅ Order \`${inv}\` successfully processed and dispatched to waiting-list channel!` });
 
                 if (process.env.HISTORY_LOG_CHANNEL_ID) {
                     const logChan = await client.channels.fetch(process.env.HISTORY_LOG_CHANNEL_ID).catch(() => null);
@@ -3522,38 +2777,99 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId.startsWith('mod_db_add_')) {
                 await safeDefer(interaction);
                 const pid = interaction.customId.replace('mod_db_add_', '');
-                const lines = interaction.fields.getTextInputValue('data').split('\n').map(l => l.trim()).filter(Boolean);
+                const amountText = interaction.fields.getTextInputValue('amount').trim();
+                const amount = parseInt(amountText);
 
-                if (lines.length === 0) return safeReply(interaction, { content: '❌ No valid stock data entered.' });
+                if (isNaN(amount) || amount <= 0) {
+                    return safeReply(interaction, { content: '❌ Jumlah stock yang ditambahkan harus berupa angka positif (lebih dari 0).' });
+                }
 
-                const { error: insertErr } = await supabase.from('stock').insert(lines.map(line => ({ product_id: pid, content: line })));
-                if (insertErr) return safeReply(interaction, { content: `❌ Failed to add stock: ${insertErr.message}` });
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (!p) return safeReply(interaction, { content: '❌ Produk tidak ditemukan.' });
 
-                const { data: count } = await supabase.from('stock').select('id', { count: 'exact' }).eq('product_id', pid);
-                await supabase.from('products').update({ stock: count.length }).eq('id', pid);
+                const currentStock = parseInt(p.stock) || 0;
+                const newStock = currentStock + amount;
 
-                await safeReply(interaction, { content: `✅ Added ${lines.length} item(s). Total stock: ${count.length}` });
+                const { error: updateErr } = await supabase.from('products').update({ stock: newStock }).eq('id', pid);
+                if (updateErr) return safeReply(interaction, { content: `❌ Gagal menambahkan stock: ${updateErr.message}` });
+
                 invalidateProductCache();
+
+                // Send Stock Alert Notification (1537401300231266314)
+                await sendStockAlertNotification(p.name, amount).catch(() => null);
+
+                await safeReply(interaction, {
+                    content: `✅ **Stock Berhasil Ditambahkan**\n📦 Produk: **${p.name}**\n➕ Jumlah Ditambahkan: **+${amount}**\n📊 Total Stock Sekarang: **${newStock}**`
+                });
                 updateDatabaseEmbed(pid);
                 debounce('dashboard', () => updateDashboard());
+                updateUnifiedMonitor().catch(() => {});
                 return;
             }
 
             // ── mod_db_edit_ ──────────────────────────────────
             if (interaction.customId.startsWith('mod_db_edit_')) {
                 await safeDefer(interaction);
-                // customId format: mod_db_edit_{pid}_{sid}
-                const without = interaction.customId.replace('mod_db_edit_', '');
-                const lastUnd = without.lastIndexOf('_');
-                const pid = without.substring(0, lastUnd);
-                const sid = without.substring(lastUnd + 1);
-                const newContent = interaction.fields.getTextInputValue('data').trim();
+                const pid = interaction.customId.replace('mod_db_edit_', '');
+                const amountText = interaction.fields.getTextInputValue('amount').trim();
+                const newStock = parseInt(amountText);
 
-                const { error: updateErr } = await supabase.from('stock').update({ content: newContent }).eq('id', sid);
-                if (updateErr) return safeReply(interaction, { content: `❌ Failed to update: ${updateErr.message}` });
+                if (isNaN(newStock) || newStock < 0) {
+                    return safeReply(interaction, { content: '❌ Jumlah stock tidak valid. Masukkan angka 0 atau lebih.' });
+                }
 
-                await safeReply(interaction, { content: '✅ Stock entry updated.' });
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (!p) return safeReply(interaction, { content: '❌ Produk tidak ditemukan.' });
+
+                const currentStock = parseInt(p.stock) || 0;
+                const addedAmount = newStock - currentStock;
+
+                const { error: updateErr } = await supabase.from('products').update({ stock: newStock }).eq('id', pid);
+                if (updateErr) return safeReply(interaction, { content: `❌ Gagal mengedit stock: ${updateErr.message}` });
+
+                invalidateProductCache();
+
+                // Send Stock Alert ONLY if stock increased (addedAmount > 0)
+                if (addedAmount > 0) {
+                    await sendStockAlertNotification(p.name, addedAmount).catch(() => null);
+                }
+
+                await safeReply(interaction, {
+                    content: `✅ **Stock Berhasil Diubah**\n📦 Produk: **${p.name}**\n📊 Total Stock Baru: **${newStock}**`
+                });
                 updateDatabaseEmbed(pid);
+                debounce('dashboard', () => updateDashboard());
+                updateUnifiedMonitor().catch(() => {});
+                return;
+            }
+
+            // ── mod_db_del_ ───────────────────────────────────
+            if (interaction.customId.startsWith('mod_db_del_')) {
+                await safeDefer(interaction);
+                const pid = interaction.customId.replace('mod_db_del_', '');
+                const amountText = interaction.fields.getTextInputValue('amount').trim();
+                const amount = parseInt(amountText);
+
+                if (isNaN(amount) || amount <= 0) {
+                    return safeReply(interaction, { content: '❌ Jumlah stock yang ingin dikurangi harus berupa angka positif (lebih dari 0).' });
+                }
+
+                const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
+                if (!p) return safeReply(interaction, { content: '❌ Produk tidak ditemukan.' });
+
+                const currentStock = parseInt(p.stock) || 0;
+                const newStock = Math.max(0, currentStock - amount);
+
+                const { error: updateErr } = await supabase.from('products').update({ stock: newStock }).eq('id', pid);
+                if (updateErr) return safeReply(interaction, { content: `❌ Gagal mengurangi stock: ${updateErr.message}` });
+
+                invalidateProductCache();
+                await safeReply(interaction, {
+                    content: `✅ **Stock Berhasil Dikurangi**\n📦 Produk: **${p.name}**\n➖ Jumlah Dikurangi: **-${amount}**\n📊 Total Stock Sekarang: **${newStock}**`
+                });
+                updateDatabaseEmbed(pid);
+                debounce('dashboard', () => updateDashboard());
+                updateUnifiedMonitor().catch(() => {});
                 return;
             }
 
@@ -3561,10 +2877,14 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId.startsWith('mod_buy_')) {
                 const pid = interaction.customId.replace('mod_buy_', '');
                 const qtyText = interaction.fields.getTextInputValue('q');
+                const robloxUsername = interaction.fields.getTextInputValue('roblox').trim();
                 const qty = parseInt(qtyText);
 
                 if (isNaN(qty) || qty <= 0)
                     return safeReply(interaction, { content: '❌ Invalid quantity. Please enter a positive number.', flags: [MessageFlags.Ephemeral] });
+
+                if (!robloxUsername)
+                    return safeReply(interaction, { content: '❌ Username Roblox wajib diisi.', flags: [MessageFlags.Ephemeral] });
 
                 await safeDefer(interaction);
 
@@ -3572,11 +2892,29 @@ client.on('interactionCreate', async interaction => {
                 const { data: p } = await supabase.from('products').select('*').eq('id', pid).single();
                 if (!p)
                     return safeReply(interaction, { content: '❌ Product not found.' });
+
+                const minBuy = Math.max(1, parseInt(p.min_buy) || 1);
+                if (qty < minBuy)
+                    return safeReply(interaction, { content: `❌ **Minimal Pembelian Gagal**\nMinimal pembelian untuk **${p.name}** adalah **${minBuy} pcs**. (Jumlah yang dimasukkan: ${qty})`, flags: [MessageFlags.Ephemeral] });
+
                 if (p.stock < qty)
                     return safeReply(interaction, { content: `❌ Not enough stock. Available: ${p.stock}` });
 
+                const unitPrice = parseInt(p.price.replace(/\D/g, '')) || 0;
+                const originalAmount = unitPrice * qty;
+
+                // Pakasir minimum transaction check (Min Rp 1.000)
+                const PAKASIR_MIN_AMOUNT = 1000;
+                if (originalAmount < PAKASIR_MIN_AMOUNT) {
+                    const recQty = Math.ceil(PAKASIR_MIN_AMOUNT / (unitPrice || 1));
+                    return safeReply(interaction, {
+                        content: `❌ **Minimal Transaksi Pakasir (Rp 1.000)**\nTotal transaksi saat ini adalah **Rp ${originalAmount.toLocaleString('id-ID')}** (${qty}x @ Rp ${unitPrice.toLocaleString('id-ID')}).\n\nPakasir membutuhkan minimal transaksi **Rp 1.000**.\nSilakan naikkan jumlah pembelian minimal **${recQty} pcs** (Total: Rp ${(recQty * unitPrice).toLocaleString('id-ID')}).`,
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+
                 const orderId = `INV${Date.now()}`;
-                const originalAmount = parseInt(p.price.replace(/\D/g, '')) * qty;
+                ROBLOX_PAYMENTS_CACHE.set(orderId, robloxUsername);
 
                 const res = await axios.post(`https://app.pakasir.com/api/transactioncreate/qris`, {
                     project: process.env.PAKASIR_SLUG,
@@ -3588,350 +2926,65 @@ client.on('interactionCreate', async interaction => {
                 if (!res?.data?.payment)
                     return safeReply(interaction, { content: '❌ Failed to create payment. Please try again later.' });
 
-                await supabase.from('pending_payments').insert([{
+                const { error: insErr } = await supabase.from('pending_payments').insert([{
                     invoice_id: orderId,
                     user_id: interaction.user.id,
                     product_id: pid,
                     qty,
                     amount: originalAmount,
+                    roblox_username: robloxUsername,
                     created_at: new Date().toISOString()
                 }]);
+
+                if (insErr) {
+                    await supabase.from('pending_payments').insert([{
+                        invoice_id: orderId,
+                        user_id: interaction.user.id,
+                        product_id: pid,
+                        qty,
+                        amount: originalAmount,
+                        created_at: new Date().toISOString()
+                    }]);
+                }
 
                 await safeReply(interaction, {
                     embeds: [new EmbedBuilder()
                         .setTitle('💳  Payment Invoice').setColor('#0099ff')
-                        .setDescription('Scan the QR code below using a QRIS-compatible app, then click **Check Payment** to verify your transfer.')
+                        .setDescription('Scan QR code di bawah menggunakan aplikasi QRIS e-wallet/bank Anda. Pembayaran Anda akan **terdeteksi dan diproses secara otomatis** oleh sistem.\n\n⚠️ **Batas Waktu Pembayaran: 5 Menit** (Order otomatis dibatalkan jika belum dibayar).')
                         .addFields(
                             { name: 'Order ID', value: `\`${orderId}\``, inline: false },
                             { name: 'Product', value: p.name, inline: true },
                             { name: 'Quantity', value: `${qty}x`, inline: true },
                             { name: 'Amount', value: `Rp. ${new Intl.NumberFormat('id-ID').format(res.data.payment.total_payment)}`, inline: true },
                             { name: 'Method', value: 'QRIS', inline: true },
-                            { name: 'Status', value: '`Awaiting Payment`', inline: true }
+                            { name: 'Status', value: '`🟢 Automatic Payment Detection Active`', inline: true },
+                            { name: '⏱️ Payment Expiration', value: '`⏳ 5 Minutes (Auto-Cancel)`', inline: true }
                         )
                         .setImage(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(res.data.payment.payment_number)}`)
                         .setTimestamp()
-                    ],
-                    components: [new ActionRowBuilder().addComponents(
-                        new ButtonBuilder().setCustomId(`btn_check_pay_${orderId}`).setLabel('Check Payment').setStyle(ButtonStyle.Success)
-                    )]
+                    ]
                 });
 
                 return;
             }
 
-            // ── mod_add_category ────────────────────────────
-            if (interaction.customId === 'mod_add_category') {
-                const manualPid = interaction.fields.getTextInputValue('pid')?.trim();
-                const name = interaction.fields.getTextInputValue('name');
-                const category = interaction.fields.getTextInputValue('category');
-                const desc = interaction.fields.getTextInputValue('desc');
-                const banner = interaction.fields.getTextInputValue('banner')?.trim() || null;
-
+            // ── mod_order_search ──────────────────────────────
+            if (interaction.customId === 'mod_order_search') {
+                const searchQuery = interaction.fields.getTextInputValue('query').trim();
                 await safeDefer(interaction);
-
-                const payload = {
-                    id: manualPid,
-                    name,
-                    category_name: category,
-                    description: desc,
-                    system_type: 'auction'
-                };
-                if (banner) payload.banner_url = banner;
-
-                let { error: insErr } = await supabase.from('products').insert([payload]);
-                
-                // Fallback if banner_url column doesn't exist
-                if (insErr && insErr.code === '42703' && banner) {
-                    delete payload.banner_url;
-                    const fallback = await supabase.from('products').insert([payload]);
-                    insErr = fallback.error;
-                    if (!insErr) console.warn(`[WARN] banner_url column missing in products table. Skipped saving banner.`);
-                }
-
-                if (insErr) return safeReply(interaction, { content: `❌ Failed to create product: ${insErr.message}` });
-                await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${manualPid}\`) created successfully!` });
-                invalidateProductCache();
-                debounce('stockDash', () => updateStockDashboard());
-                return;
+                const payload = await renderOrderManager('ALL', searchQuery);
+                return safeReply(interaction, payload);
             }
 
-            // ── mod_auction_edit_ ─────────────────────────────
-            if (interaction.customId.startsWith('mod_auction_edit_')) {
-                const pid = interaction.customId.replace('mod_auction_edit_', '');
-                const name = interaction.fields.getTextInputValue('name');
-                const category = interaction.fields.getTextInputValue('category');
-                const desc = interaction.fields.getTextInputValue('desc');
-                const banner = interaction.fields.getTextInputValue('banner')?.trim() || null;
-
-                await safeDefer(interaction);
-
-                const payload = {
-                    name,
-                    category_name: category,
-                    description: desc
-                };
-                if (banner !== null) payload.banner_url = banner;
-
-                let { error: updErr } = await supabase.from('products').update(payload).eq('id', pid);
-
-                // Fallback if banner_url column doesn't exist
-                if (updErr && updErr.code === '42703' && banner !== null) {
-                    delete payload.banner_url;
-                    const fallback = await supabase.from('products').update(payload).eq('id', pid);
-                    updErr = fallback.error;
-                    if (!updErr) console.warn(`[WARN] banner_url column missing in products table. Skipped updating banner.`);
-                }
-
-                if (updErr) return safeReply(interaction, { content: `❌ Failed to update product: ${updErr.message}` });
-
-                await safeReply(interaction, { content: `✅ Product **${name}** (ID: \`${pid}\`) updated successfully!` });
-                updateDashboard();
-                updateStockDashboard();
-                return;
-            }
-
-            // ── mod_auction_add ──────────────────────────────
-            if (interaction.customId === 'mod_auction_add') {
-                const pid = interaction.fields.getTextInputValue('pid');
-                const basePriceStr = interaction.fields.getTextInputValue('base_price');
-                const incStr = interaction.fields.getTextInputValue('increment');
-                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
-
-                await safeDefer(interaction);
-
-                // Fetch product details from database
-                const { data: p, error: pErr } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (pErr || !p) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found in database. Please create it first via 'Add Product'.` });
-
-                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
-                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
-                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return safeReply(interaction, { content: '❌ Invalid price, increment, or duration format.' });
-
-                const endTime = new Date(Date.now() + duration * 60000).toISOString();
-
-                const payload = {
-                    name: p.name,
-                    category_name: p.category_name,
-                    description: p.description,
-                    base_price: basePrice,
-                    current_bid: basePrice,
-                    bid_increment: increment,
-                    product_id: pid,
-                    status: 'pending',
-                    end_time: endTime
-                };
-                if (p.banner_url) payload.banner_url = p.banner_url;
-
-                let { error: insertErr } = await supabase.from('auctions').insert([payload]);
-
-                // Fallback if banner_url column doesn't exist
-                if (insertErr && insertErr.code === '42703' && p.banner_url) {
-                    delete payload.banner_url;
-                    const fallback = await supabase.from('auctions').insert([payload]);
-                    insertErr = fallback.error;
-                    if (!insertErr) console.warn(`[WARN] banner_url column missing in auctions table. Skipped saving banner.`);
-                }
-
-                if (insertErr) return safeReply(interaction, { content: `❌ Failed to create auction: ${insertErr.message}` });
-
-                await safeReply(interaction, { content: `✅ Auction for \`${p.name}\` created as PENDING. Start it via Settings.` });
-                updateAuctionDashboard();
-                return;
-            }
-
-            // ── mod_edit_active_auction_ ──────────────────────────
-            if (interaction.customId.startsWith('mod_edit_active_auction_')) {
-                const aucId = interaction.customId.replace('mod_edit_active_auction_', '');
-                const pid = interaction.fields.getTextInputValue('pid').trim();
-                const basePriceStr = interaction.fields.getTextInputValue('base_price');
-                const incStr = interaction.fields.getTextInputValue('increment');
-                const duration = parseInt(interaction.fields.getTextInputValue('duration'));
-
-                await safeDefer(interaction);
-
-                const { data: auc } = await supabase.from('auctions').select('*').eq('id', aucId).single();
-                if (!auc) return safeReply(interaction, { content: '❌ Auction not found.' });
-
-                // Fetch product to ensure it exists and get names
-                const { data: p, error: pErr } = await supabase.from('products').select('*').eq('id', pid).single();
-                if (pErr || !p) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found in database.` });
-
-                const basePrice = parseInt(basePriceStr.replace(/\D/g, ''));
-                const increment = parseInt(incStr.replace(/\D/g, '')) || 5000;
-                if (isNaN(basePrice) || isNaN(duration) || isNaN(increment)) return safeReply(interaction, { content: '❌ Invalid price, increment, or duration format.' });
-
-                const endTime = new Date(Date.now() + duration * 60000).toISOString();
-
-                // If current_bid is equal to old base_price (no bids), update it to new base_price.
-                // Otherwise leave current_bid as is so we don't ruin active bids.
-                const newCurrentBid = (auc.current_bid === auc.base_price) ? basePrice : Math.max(basePrice, auc.current_bid);
-
-                const payload = {
-                    product_id: pid,
-                    name: p.name,
-                    category_name: p.category_name,
-                    description: p.description,
-                    base_price: basePrice,
-                    current_bid: newCurrentBid,
-                    bid_increment: increment,
-                    end_time: endTime
-                };
-
-                if (p.banner_url) payload.banner_url = p.banner_url;
-
-                let { error: updErr } = await supabase.from('auctions').update(payload).eq('id', aucId);
-                
-                // Fallback for missing banner_url column
-                if (updErr && updErr.code === '42703' && p.banner_url) {
-                    delete payload.banner_url;
-                    const fallback = await supabase.from('auctions').update(payload).eq('id', aucId);
-                    updErr = fallback.error;
-                }
-
-                if (updErr) return safeReply(interaction, { content: `❌ Failed to update auction: ${updErr.message}` });
-
-                await safeReply(interaction, { content: `✅ Auction updated successfully!\nProduct: \`${pid}\`\nStart Price: \`Rp ${basePrice.toLocaleString('id-ID')}\`\nBid Increment: \`Rp ${increment.toLocaleString('id-ID')}\`\nRemaining: \`${duration} mins\`` });
-                updateAuctionDashboard();
-                return;
-            }
-
-            // ── mod_open_bid ──────────────────────────────────
-            if (interaction.customId === 'mod_open_bid') {
-                const bidStr = interaction.fields.getTextInputValue('amount');
-                const bidAmt = parseInt(bidStr.replace(/\D/g, ''));
-
-                const adminRoleId = process.env.ADMIN_ROLE_ID || '1440676433859973130';
-                const isAdmin = interaction.member && typeof interaction.member.roles?.cache?.has === 'function' && interaction.member.roles.cache.has(adminRoleId);
-
-                if (isNaN(bidAmt)) {
-                    // Anti-fake bid logic: Automated Ban for non-numeric troll bids
-                    try {
-                        const fakeBidReason = `Fake/Troll Bid — Invalid non-numeric input submitted to auction bid system. Input: "${bidStr}"`;
-
-                        // 1. Discord server ban
-                        await interaction.member.ban({ reason: fakeBidReason }).catch(() => {});
-
-                        // 2. Blacklist in database + memory cache
-                        await supabase.from('banned_users').upsert([{ id: interaction.user.id, reason: fakeBidReason, created_at: new Date().toISOString() }]);
-                        banCache.set(interaction.user.id, fakeBidReason);
-
-                        await safeReply(interaction, { content: '⛔ **BANNED**: Fake/Troll bids are not tolerated. Your attempt has been logged.', flags: [MessageFlags.Ephemeral] });
-
-                        // 3. Send log to restricted-users channel
-                        const logChan = await client.channels.fetch(process.env.RESTRICTED_LOG_CHANNEL_ID || '1503766353721430036').catch(() => null);
-                        if (logChan) {
-                            const embed = new EmbedBuilder()
-                                .setTitle('Security Enforcement — Fake Bid Detected')
-                                .setColor('#c0392b')
-                                .addFields(
-                                    { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
-                                    { name: 'User ID', value: `\`${interaction.user.id}\``, inline: true },
-                                    { name: '\u200b', value: '\u200b', inline: true },
-                                    { name: 'Reason', value: 'Fake/Troll Bid (Invalid Input)', inline: false },
-                                    { name: 'Input Submitted', value: `\`${bidStr}\``, inline: true },
-                                    { name: 'Action Taken', value: '`Server Ban + Blacklist`', inline: true }
-                                )
-                                .setTimestamp();
-                            await logChan.send({ embeds: [embed] }).catch(() => {});
-                        }
-
-                        // 4. Send structured blacklist log to AUCTION_EXPIRED_BAN_LOG_ID
-                        // Fetch current active auction for context
-                        const { data: activeAuc } = await supabase.from('auctions').select('id, name, product_id, current_bid').eq('status', 'active').maybeSingle();
-                        sendBlacklistBanLog({
-                            userId: interaction.user.id,
-                            userTag: interaction.user.tag,
-                            auctionProduct: activeAuc?.name || '—',
-                            auctionId: activeAuc?.id || '—',
-                            finalBid: 0,
-                            reason: fakeBidReason,
-                            status: 'ACTIVE — PERMANENTLY BANNED'
-                        }).catch(() => {});
-
-                        console.log(`[SECURITY] Fake bid ban executed: ${interaction.user.tag} (${interaction.user.id}) | Input: "${bidStr}"`);
-                    } catch (e) { console.error('[AUCTION] Failed to ban troll:', e.message); }
-                    return;
-                }
-
-                await safeDefer(interaction);
-
-                // Check registration here to ensure token stability at start
-                const { data: user } = await supabase.from('users').select('id').eq('id', interaction.user.id).single();
-                if (!user) return safeReply(interaction, { content: '❌ You are not registered for the auction. Please click **Register** on the dashboard first.' });
-
-                const { data: auction } = await supabase.from('auctions').select('*').eq('status', 'active').single();
-                if (!auction) return safeReply(interaction, { content: '❌ No active auction found.' });
-
-                const minNextBid = auction.current_bid + (auction.bid_increment || 5000);
-                if (bidAmt < minNextBid) {
-                    return safeReply(interaction, { content: `❌ Your bid must be at least **${formatPrice(minNextBid)}** (Min. Increment: ${formatPrice(auction.bid_increment)})` });
-                }
-
-                // Check if bid is a valid increment multiple
-                const diff = bidAmt - auction.base_price;
-                if (diff % (auction.bid_increment || 5000) !== 0) {
-                    return safeReply(interaction, { content: `❌ Bid must be a multiple of the increment: **${formatPrice(auction.bid_increment)}** starting from **${formatPrice(auction.base_price)}**.` });
-                }
-
-                // Update auction with new highest bid
-                const { error: updateErr } = await supabase.from('auctions').update({
-                    current_bid: bidAmt,
-                    highest_bidder_id: interaction.user.id
-                }).eq('id', auction.id);
-
-                if (updateErr) return safeReply(interaction, { content: `❌ Failed to place bid: ${updateErr.message}` });
-
-                // Record in bid history
-                await supabase.from('auction_bids').insert([{
-                    auction_id: auction.id,
-                    user_id: interaction.user.id,
-                    amount: bidAmt
-                }]);
-
-                console.log(`[SECURITY] Bid accepted: User ${interaction.user.tag} (${interaction.user.id}) placed bid of ${bidAmt} for auction ${auction.id}`);
-                await safeReply(interaction, { content: `✅ Your bid of **${formatPrice(bidAmt)}** has been placed!` });
-                updateAuctionDashboard();
-                return;
-            }
-            // ── mod_auction_add_stock ────────────────────────
-            if (interaction.customId === 'mod_auction_add_stock') {
-                await safeDefer(interaction);
-
-                const pid = interaction.fields.getTextInputValue('pid');
-                const content = interaction.fields.getTextInputValue('content');
-
-                const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                if (lines.length === 0) return safeReply(interaction, { content: '❌ No valid content provided.' });
-
-                const { data: prod } = await supabase.from('products').select('id, name').eq('id', pid).single();
-                if (!prod) return safeReply(interaction, { content: `❌ Product ID \`${pid}\` not found.` });
-
-                const inserts = lines.map(line => ({ product_id: pid, content: line }));
-                const { error: stockErr } = await supabase.from('stock').insert(inserts);
-
-                if (stockErr) return safeReply(interaction, { content: `❌ Failed to add stock: ${stockErr.message}` });
-
-                const { count } = await supabase.from('stock').select('id', { count: 'exact', head: true }).eq('product_id', pid);
-                await supabase.from('products').update({ stock: count }).eq('id', pid);
-
-                await safeReply(interaction, { content: `✅ Successfully added **${lines.length}** items to **${prod.name}** (\`${pid}\`).` });
-
-                // Fire and forget updates to keep response fast
-                updateDashboard().catch(() => { });
-                updateStockDashboard().catch(() => { });
-                updateDatabaseEmbed(pid).catch(() => { });
-                return;
-            }
-
-        }
-
+        } // end isModalSubmit()
     } catch (e) {
+
         if (e.code === 10062) return; // Interaction expired/handled, skip reporting
         console.error('Interaction Error:', e);
         await safeReply(interaction, { content: '❌ An unexpected error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
     }
 });
+
 
 
 // ─────────────────────────────────────────────────────────────
@@ -3954,15 +3007,10 @@ client.once('clientReady', async () => {
         await registerCommands();
 
         // Sequential updates with error handling
+        _lastDashboardHash = '';
         await updateDashboard().catch(e => console.error('[READY] Dashboard main failed:', e.message));
         await updateVersionDashboard().catch(e => console.error('[READY] Version dash failed:', e.message));
-        await updateAuctionDashboard().catch(e => console.error('[READY] Auction dash failed:', e.message));
-        await updateStockDashboard().catch(e => console.error('[READY] Stock dash failed:', e.message));
-        startAuctionFastLoop();
-        checkAuctionDeadlines();
-        checkAuctionSettlements();
         await updateHoneypotWarning().catch(e => console.error('[READY] Honeypot failed:', e.message));
-        await refreshBanCache(); // Load banned users into memory for 0ms lookups
 
         // Migrate old per-product monitors to unified monitor (one-time, saved to config)
         await migrateToUnifiedMonitor().catch(e => console.warn('[READY] Migration failed:', e.message));
@@ -3975,7 +3023,6 @@ client.once('clientReady', async () => {
         console.log('[READY] Counting track synced.');
 
         // Migrate historical orders into sold_archive (one-time)
-        await migrateSoldArchive().catch(e => console.warn('[READY] Sold archive migration failed:', e.message));
 
         // Initialize sold data search panel
         await updateSoldDataDashboard().catch(e => console.warn('[READY] Sold data dashboard failed:', e.message));
@@ -4014,18 +3061,14 @@ client.once('clientReady', async () => {
                     await new Promise(r => setTimeout(r, 1000));
                     await updateUnifiedMonitor().catch(() => { });
                     await new Promise(r => setTimeout(r, 1000));
-                    await updateStockDashboard().catch(() => { });
                     await new Promise(r => setTimeout(r, 1000));
-                    await updateAuctionDashboard().catch(() => { });
                     await new Promise(r => setTimeout(r, 1000));
                     await updateVersionDashboard().catch(() => { });
                     await new Promise(r => setTimeout(r, 1000));
-                    await checkAuctionDeadlines().catch(() => { });
-                    await checkAuctionSettlements().catch(() => { });
                     await updateHoneypotWarning().catch(() => { });
-                    await refreshBanCache().catch(() => { });
                     await updateCountingTrack().catch(() => { });
                     await updateSoldDataDashboard().catch(() => { });
+                    await autoCheckPendingPayments().catch(() => { });
                     refreshPresence();
                 } catch (e) {
                     if (!e.message?.includes('Connect Timeout')) console.error('[LOOP] Failure in refresh cycle:', e.message);
@@ -4035,6 +3078,12 @@ client.once('clientReady', async () => {
                     if (duration > 30000) console.log(`[LOOP] Cycle completed in ${Math.round(duration / 1000)}s`);
                 }
             }, interval);
+
+            // Dedicated Fast Payment Polling (Every 10 seconds)
+            setInterval(() => {
+                autoCheckPendingPayments().catch(() => { });
+            }, 10000);
+
         }, 20000);
     } catch (e) {
         console.error('[FATAL] Readiness failed:', e);
